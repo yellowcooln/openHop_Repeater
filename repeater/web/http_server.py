@@ -1,3 +1,4 @@
+# ruff: noqa: BLE001, DTZ006, UP032, UP035, UP045
 import json
 import logging
 import mimetypes
@@ -22,6 +23,7 @@ from .api_endpoints import APIEndpoints
 from .auth.api_tokens import APITokenManager
 from .auth.cherrypy_tool import register_require_auth_tool
 from .auth.jwt_handler import JWTHandler
+from .auth.oidc_client import OIDCClient
 from .auth_endpoints import AuthEndpoints
 
 # WebSocket support
@@ -384,7 +386,11 @@ class HTTPStatsServer:
 
         # Create auth endpoints (APIEndpoints has the config_manager)
         self.auth_app = AuthEndpoints(
-            self.config, self.jwt_handler, self.token_manager, self.app.api.config_manager
+            self.config,
+            self.jwt_handler,
+            self.token_manager,
+            self.app.api.config_manager,
+            oidc_client_factory=OIDCClient,
         )
 
         # Create documentation endpoints as separate app

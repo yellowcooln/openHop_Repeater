@@ -208,3 +208,27 @@ def test_cors_response_headers_allow_bearer_preflight_without_credentials():
     assert "OPTIONS" in headers["Access-Control-Allow-Methods"]
     assert "Authorization" in headers["Access-Control-Allow-Headers"]
     assert "Access-Control-Allow-Credentials" not in headers
+
+
+def test_http_server_passes_oidc_factory_to_auth_endpoints(monkeypatch, tmp_path):
+    def _fake_init_auth(self):
+        self.jwt_handler = object()
+        self.token_manager = object()
+
+    captured = {}
+    monkeypatch.setattr(hs.HTTPStatsServer, "_init_auth_handlers", _fake_init_auth)
+    monkeypatch.setattr(
+        hs,
+        "StatsApp",
+        lambda *args, **kwargs: SimpleNamespace(api=SimpleNamespace(config_manager=object())),
+    )
+    monkeypatch.setattr(hs, "DocEndpoint", lambda *_args, **_kwargs: object())
+
+    def fake_auth(*args, **kwargs):
+        captured["kwargs"] = kwargs
+        return object()
+
+    monkeypatch.setattr(hs, "AuthEndpoints", fake_auth)
+    hs.HTTPStatsServer(config={}, config_path=str(Path(tmp_path) / "cfg.yml"))
+
+    assert "oidc_client_factory" in captured["kwargs"]

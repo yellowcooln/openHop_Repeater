@@ -1,7 +1,9 @@
+# ruff: noqa: BLE001
 """
 Authentication endpoints for login and token management
 """
 
+import json
 import logging
 import math
 import threading
@@ -9,7 +11,9 @@ import time
 
 import cherrypy
 
+from .auth.config import normalize_auth_settings
 from .auth.middleware import require_auth
+from .oidc_endpoints import OIDCEndpoints
 
 logger = logging.getLogger(__name__)
 
@@ -227,12 +231,19 @@ class AuthEndpoints:
         token_manager,
         config_manager=None,
         login_throttle=None,
+        oidc_client_factory=None,
     ):
         self.config = config
         self.jwt_handler = jwt_handler
         self.token_manager = token_manager
         self.config_manager = config_manager
         self._login_throttle = login_throttle or _LoginThrottle()
+        self.auth_settings = normalize_auth_settings(config)
+        self.oidc = OIDCEndpoints(
+            self.auth_settings,
+            jwt_handler,
+            oidc_client_factory=oidc_client_factory,
+        )
 
     @staticmethod
     def _get_request_ip() -> str:
@@ -250,6 +261,20 @@ class AuthEndpoints:
         return "unknown"
 
     @cherrypy.expose
+    @cherrypy.tools.json_out()
+    def methods(self):
+        if cherrypy.request.method != "GET":
+            raise cherrypy.HTTPError(405, "Method not allowed")
+        result = {
+            "success": True,
+            "local": self.auth_settings.local_enabled,
+            "oidc": self.auth_settings.oidc_enabled,
+        }
+        if self.auth_settings.oidc_enabled and self.auth_settings.oidc:
+            result["oidc_provider_name"] = self.auth_settings.oidc.provider_name
+        return result
+
+    @cherrypy.expose
     def login(self, **kwargs):
 
         cherrypy.response.headers["Content-Type"] = "application/json"
@@ -265,10 +290,18 @@ class AuthEndpoints:
         if cherrypy.request.method != "POST":
             raise cherrypy.HTTPError(405, "Method not allowed")
 
+        if not self.auth_settings.local_enabled:
+            cherrypy.response.status = 403
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": "Local web login is disabled.",
+                    "error_code": "local_login_disabled",
+                }
+            ).encode("utf-8")
+
         try:
             # Parse JSON body manually since we can't use json_in decorator with OPTIONS
-            import json
-
             body = cherrypy.request.body.read().decode("utf-8")
             data = json.loads(body) if body else {}
 
