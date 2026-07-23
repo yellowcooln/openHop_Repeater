@@ -4,8 +4,7 @@ from unittest.mock import patch
 
 import pytest
 
-from repeater import keygen
-from repeater import local_cli
+from repeater import keygen, local_cli
 
 
 class _Resp:
@@ -128,6 +127,31 @@ def test_run_client_cli_happy_path_and_command_error_branch(capsys):
     assert "Error: bad cmd" in out
 
 
+def test_run_client_cli_uses_api_token_header_without_login_or_printing_secret(capsys):
+    responses = [
+        _Resp({"success": True, "data": {"reply": "pong"}}),
+    ]
+    captured = {}
+
+    def _urlopen(req, timeout):
+        captured["headers"] = dict(req.header_items())
+        captured["url"] = req.full_url
+        captured["timeout"] = timeout
+        return responses.pop(0)
+
+    with (
+        patch("urllib.request.urlopen", side_effect=_urlopen),
+        patch("builtins.input", side_effect=["ping", "exit"]),
+    ):
+        local_cli.run_client_cli(api_token="api-secret-token", port=9000)
+
+    out = capsys.readouterr().out
+    assert "api-secret-token" not in out
+    assert captured["url"] == "http://127.0.0.1:9000/api/cli"
+    assert captured["headers"]["X-api-key"] == "api-secret-token"
+    assert "Authorization" not in captured["headers"]
+
+
 def test_run_client_cli_handles_runtime_connection_error_during_command(capsys):
     import urllib.error
 
@@ -167,7 +191,7 @@ def test_main_uses_config_defaults_and_cli_overrides(capsys):
     ):
         local_cli.main()
 
-    run_cli.assert_called_once_with(host="127.0.0.1", port=8765, password="pw")
+    run_cli.assert_called_once_with(host="127.0.0.1", port=8765, password="pw", api_token=None)
 
     class _ArgsOverride:
         config = "/tmp/cfg.yaml"
@@ -181,7 +205,7 @@ def test_main_uses_config_defaults_and_cli_overrides(capsys):
     ):
         local_cli.main()
 
-    run_cli2.assert_called_once_with(host="10.0.0.9", port=9999, password="pw")
+    run_cli2.assert_called_once_with(host="10.0.0.9", port=9999, password="pw", api_token=None)
 
     config_missing_pw = {"repeater": {"security": {}}, "http": {"port": 8765}}
     with (
@@ -195,3 +219,24 @@ def test_main_uses_config_defaults_and_cli_overrides(capsys):
     exit_mock.assert_called_once_with(1)
     out = capsys.readouterr().out
     assert "No admin_password found" in out
+
+
+def test_main_prefers_explicit_api_token_environment_without_password(monkeypatch):
+    class _Args:
+        config = "/tmp/cfg.yaml"
+        host = "127.0.0.2"
+        port = 7777
+        api_token_file = None
+
+    monkeypatch.setenv("OPENHOP_API_TOKEN", "env-api-token")
+
+    with (
+        patch("argparse.ArgumentParser.parse_args", return_value=_Args()),
+        patch("repeater.local_cli._load_config", return_value={"repeater": {"security": {}}}),
+        patch("repeater.local_cli.run_client_cli") as run_cli,
+    ):
+        local_cli.main()
+
+    run_cli.assert_called_once_with(
+        host="127.0.0.2", port=7777, password=None, api_token="env-api-token"
+    )
