@@ -1,5 +1,6 @@
 import io
 import json
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -288,6 +289,66 @@ def test_refresh_paths(cp_ctx):
     cfg["token_manager"] = _token_mgr()
     out = json.loads(auth.refresh().decode())
     assert out["success"] is True
+
+
+def test_refresh_oidc_caps_expiry_and_requires_reauth(cp_ctx):
+    captured = {}
+
+    def create_jwt(username, client_id, extra_claims=None, max_exp=None):
+        captured.update(
+            {
+                "username": username,
+                "client_id": client_id,
+                "extra_claims": extra_claims,
+                "max_exp": max_exp,
+            }
+        )
+        return "jwt-oidc"
+
+    auth = AuthEndpoints(
+        config={},
+        jwt_handler=SimpleNamespace(
+            verify_jwt=lambda _t: {}, create_jwt=create_jwt, expiry_minutes=15
+        ),
+        token_manager=_token_mgr(),
+    )
+
+    oidc_payload = {
+        "sub": "alice",
+        "client_id": "client-a",
+        "auth_source": "oidc",
+        "role": "admin",
+        "oidc_iss": "https://issuer/",
+        "oidc_sub": "sub-1",
+        "session_exp": int(time.time()) + 300,
+    }
+    _req, _resp, cfg = cp_ctx(
+        method="POST", headers={"Authorization": "Bearer ok"}, body=json.dumps({}).encode()
+    )
+    cfg["jwt_handler"] = SimpleNamespace(
+        verify_jwt=lambda _t: oidc_payload, create_jwt=create_jwt, expiry_minutes=15
+    )
+    cfg["token_manager"] = _token_mgr()
+    out = json.loads(auth.refresh().decode())
+
+    assert out["success"] is True
+    assert captured["extra_claims"]["auth_source"] == "oidc"
+    assert captured["max_exp"] == oidc_payload["session_exp"]
+
+    expired_payload = dict(oidc_payload, session_exp=int(time.time()) - 1)
+    _req, _resp, cfg = cp_ctx(
+        method="POST", headers={"Authorization": "Bearer ok"}, body=json.dumps({}).encode()
+    )
+    cfg["jwt_handler"] = SimpleNamespace(
+        verify_jwt=lambda _t: expired_payload, create_jwt=create_jwt, expiry_minutes=15
+    )
+    cfg["token_manager"] = _token_mgr()
+    out = json.loads(auth.refresh().decode())
+
+    assert out["success"] is False
+    assert out["reauth_required"] is True
+    assert out["error_code"] == "oidc_session_expired"
+    assert cherrypy.response.status == 401
 
 
 def test_change_password_paths(cp_ctx):

@@ -1,6 +1,6 @@
 import logging
 import time
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import jwt
 
@@ -12,12 +12,26 @@ class JWTHandler:
         self.secret = secret
         self.expiry_minutes = expiry_minutes
 
-    def create_jwt(self, username: str, client_id: str) -> str:
+    def create_jwt(
+        self,
+        username: str,
+        client_id: str,
+        extra_claims: dict[str, Any] | None = None,
+        max_exp: int | None = None,
+    ) -> str:
 
         now = int(time.time())
         expiry = now + (self.expiry_minutes * 60)
+        if max_exp is not None:
+            expiry = min(expiry, int(max_exp))
 
         payload = {"sub": username, "exp": expiry, "iat": now, "client_id": client_id}
+        if extra_claims:
+            reserved = {"sub", "exp", "iat", "client_id"}
+            overlap = reserved.intersection(extra_claims)
+            if overlap:
+                raise ValueError(f"JWT extra_claims include reserved claims: {', '.join(sorted(overlap))}")
+            payload.update(extra_claims)
 
         token = jwt.encode(payload, self.secret, algorithm="HS256")
         logger.info(f"Created JWT for user '{username}' with client_id '{client_id[:8]}...'")

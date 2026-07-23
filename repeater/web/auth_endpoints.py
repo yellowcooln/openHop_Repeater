@@ -422,6 +422,7 @@ class AuthEndpoints:
                         "username": payload["sub"],
                         "client_id": payload.get("client_id"),
                         "auth_method": "jwt",
+                        "payload": payload,
                     }
 
             # Check API token
@@ -451,7 +452,34 @@ class AuthEndpoints:
                 )
 
             # Create new JWT token (refreshes expiry time)
-            new_token = self.jwt_handler.create_jwt(user_info["username"], client_id)
+            payload = user_info.get("payload") or {}
+            extra_claims = None
+            max_exp = None
+            if payload.get("auth_source") == "oidc":
+                session_exp = int(payload.get("session_exp") or 0)
+                if session_exp <= int(time.time()):
+                    cherrypy.response.status = 401
+                    return json.dumps(
+                        {
+                            "success": False,
+                            "error": "OIDC session expired. Reauthentication required.",
+                            "error_code": "oidc_session_expired",
+                            "reauth_required": True,
+                        }
+                    ).encode("utf-8")
+                extra_claims = {
+                    key: payload[key]
+                    for key in ("auth_source", "role", "oidc_iss", "oidc_sub", "session_exp")
+                    if key in payload
+                }
+                max_exp = session_exp
+
+            if extra_claims is None and max_exp is None:
+                new_token = self.jwt_handler.create_jwt(user_info["username"], client_id)
+            else:
+                new_token = self.jwt_handler.create_jwt(
+                    user_info["username"], client_id, extra_claims=extra_claims, max_exp=max_exp
+                )
 
             logger.info(
                 f"Token refreshed for user '{user_info['username']}' from client '{client_id[:8]}...'"

@@ -1,3 +1,4 @@
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -26,6 +27,34 @@ def test_jwt_handler_create_and_verify_and_invalid_cases():
     )
     assert h.verify_jwt(expired) is None
     assert h.verify_jwt("not-a-token") is None
+
+
+def test_jwt_handler_extra_claims_reserved_protection_and_max_exp():
+    h = JWTHandler("test-secret-key-minimum-32-bytes!!", expiry_minutes=15)
+    max_exp = int(time.time()) + 100
+
+    token = h.create_jwt(
+        "alice",
+        "client-1",
+        extra_claims={
+            "auth_source": "oidc",
+            "role": "admin",
+            "oidc_iss": "https://issuer/",
+            "oidc_sub": "sub-1",
+            "session_exp": max_exp,
+        },
+        max_exp=max_exp,
+    )
+    payload = h.verify_jwt(token)
+
+    assert payload["sub"] == "alice"
+    assert payload["client_id"] == "client-1"
+    assert payload["auth_source"] == "oidc"
+    assert payload["exp"] == max_exp
+
+    for reserved in ("sub", "iat", "exp", "client_id"):
+        with pytest.raises(ValueError, match="reserved"):
+            h.create_jwt("alice", "client-1", extra_claims={reserved: "bad"})
 
 
 def test_api_token_manager_happy_paths_and_revoke_false():
