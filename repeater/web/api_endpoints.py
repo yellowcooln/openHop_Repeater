@@ -37,6 +37,21 @@ from .companion_endpoints import CompanionAPIEndpoints
 from .update_endpoints import UpdateAPIEndpoints
 
 logger = logging.getLogger("HTTPServer")
+REDACTED_SENTINEL = "*** REDACTED ***"
+_SECRET_FIELD_NAMES = {
+    "admin_password",
+    "guest_password",
+    "jwt_secret",
+    "client_secret",
+    "password",
+    "passwd",
+    "api_key",
+    "api_token",
+    "access_token",
+    "refresh_token",
+    "id_token",
+    "token",
+}
 
 POLICY_GROUP_KINDS = {
     "channel_hash": "channel_hashes",
@@ -45,6 +60,59 @@ POLICY_GROUP_KINDS = {
     "pubkey": "pubkeys",
     "pubkeys": "pubkeys",
 }
+
+
+def _is_secret_field_name(key: object) -> bool:
+    """Return true for private credential fields without catching public keys."""
+    if not isinstance(key, str):
+        return False
+
+    normalized = key.strip().lower().replace("-", "_")
+    if normalized in {"public_key", "public_key_full", "client_id", "key_id"}:
+        return False
+    if normalized in _SECRET_FIELD_NAMES:
+        return True
+    return normalized.endswith(("_secret", "_token"))
+
+
+def _redact_nested_secrets(value):
+    """Recursively redact private scalar values while preserving object shape."""
+    if isinstance(value, dict):
+        redacted = {}
+        for key, child in value.items():
+            if _is_secret_field_name(key) and child not in (None, ""):
+                redacted[key] = REDACTED_SENTINEL
+            else:
+                redacted[key] = _redact_nested_secrets(child)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_nested_secrets(item) for item in value]
+    return value
+
+
+def _preserve_redacted_sentinels(imported, current):
+    """Replace redacted sentinels in an import with the current same-path value."""
+    if imported == REDACTED_SENTINEL:
+        return current if current is not None else REDACTED_SENTINEL
+
+    if isinstance(imported, dict):
+        current_dict = current if isinstance(current, dict) else {}
+        return {
+            key: _preserve_redacted_sentinels(value, current_dict.get(key))
+            for key, value in imported.items()
+        }
+
+    if isinstance(imported, list):
+        current_list = current if isinstance(current, list) else []
+        return [
+            _preserve_redacted_sentinels(
+                item,
+                current_list[index] if index < len(current_list) else None,
+            )
+            for index, item in enumerate(imported)
+        ]
+
+    return imported
 
 
 # ============================================================================
@@ -7550,9 +7618,10 @@ class APIEndpoints:
         GET /api/config_export
         GET /api/config_export?include_secrets=true   (full backup with secrets)
 
-        By default, sensitive fields (passwords, JWT secrets, identity keys)
-        are redacted.  Pass ?include_secrets=true for a full backup that
-        includes all secrets — required for restoring to a new device.
+        By default, sensitive fields (passwords, JWT secrets, OIDC client
+        secrets, identity keys) are redacted.  Pass ?include_secrets=true for
+        a full authenticated backup that includes all secrets — required for
+        restoring to a new device.
 
         Returns: {"success": true, "data": {"meta": {...}, "config": {...}}}
         """
@@ -7578,11 +7647,13 @@ class APIEndpoints:
                         if isinstance(entry.get("identity_key"), bytes):
                             entry["identity_key"] = entry["identity_key"].hex()
             else:
+                exported = _redact_nested_secrets(exported)
+
                 # Redact sensitive fields
                 sec = exported.get("repeater", {}).get("security", {})
                 for field in ("admin_password", "guest_password", "jwt_secret"):
                     if field in sec:
-                        sec[field] = "*** REDACTED ***"
+                        sec[field] = REDACTED_SENTINEL
 
                 # Redact repeater identity key
                 rep = exported.get("repeater", {})
@@ -7594,7 +7665,7 @@ class APIEndpoints:
                     entries = exported.get("identities", {}).get(section, []) or []
                     for entry in entries:
                         if "identity_key" in entry:
-                            entry["identity_key"] = "*** REDACTED ***"
+                            entry["identity_key"] = REDACTED_SENTINEL
 
             # Ensure all bytes values are converted to hex for JSON serialisation
             def _sanitize(obj):
@@ -7708,17 +7779,19 @@ class APIEndpoints:
                     logger.info(f"Config import: skipping unknown section '{section}'")
                     continue
 
+                value = _preserve_redacted_sentinels(value, self.config.get(section))
+
                 if section == "repeater" and isinstance(value, dict):
                     # Preserve security secrets that are redacted
                     sec = value.get("security", {})
                     if isinstance(sec, dict):
                         cur_sec = self.config.get("repeater", {}).get("security", {})
                         for field in ("admin_password", "guest_password", "jwt_secret"):
-                            if sec.get(field) == "*** REDACTED ***":
+                            if sec.get(field) == REDACTED_SENTINEL:
                                 sec[field] = cur_sec.get(field, "")
                     # Restore identity_key only if a real (non-redacted) hex value is provided
                     ik = value.get("identity_key")
-                    if ik and isinstance(ik, str) and ik != "*** REDACTED ***":
+                    if ik and isinstance(ik, str) and ik != REDACTED_SENTINEL:
                         try:
                             value["identity_key"] = bytes.fromhex(ik)
                         except ValueError:
@@ -7735,7 +7808,7 @@ class APIEndpoints:
                         cur_entries = self.config.get("identities", {}).get(id_section, []) or []
                         cur_by_name = {e.get("name"): e for e in cur_entries}
                         for entry in entries:
-                            if entry.get("identity_key") == "*** REDACTED ***":
+                            if entry.get("identity_key") == REDACTED_SENTINEL:
                                 existing = cur_by_name.get(entry.get("name"), {})
                                 entry["identity_key"] = existing.get("identity_key", "")
 

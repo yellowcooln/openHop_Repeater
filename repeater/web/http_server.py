@@ -94,7 +94,7 @@ def _install_cheroot_bad_fd_unraisable_filter() -> None:
 class LogBuffer(logging.Handler):
     _SECRET_PATTERNS = (
         re.compile(
-            r"(?i)\b(admin_password|guest_password|password|passwd|api[_-]?key|token|jwt_secret)\b(\s*[:=]\s*)(['\"]?)([^,'\"\s]+)(['\"]?)"
+            r"(?i)\b(admin_password|guest_password|password|passwd|api[_-]?key|token|jwt_secret|client_secret|authorization_code|auth_code|code)\b(\s*[:=]\s*)(['\"]?)([^,'\"\s]+)(['\"]?)"
         ),
         re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._-]+"),
     )

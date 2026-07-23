@@ -571,6 +571,44 @@ def test_config_export_redacts_secrets_and_identity_keys(cherrypy_ctx):
     assert result["data"]["meta"]["includes_secrets"] is False
 
 
+def test_config_export_redacts_nested_oidc_client_secret_but_keeps_public_keys(cherrypy_ctx):
+    request, _ = cherrypy_ctx
+    request.method = "GET"
+
+    api = _make_api(
+        {
+            "web": {
+                "auth": {
+                    "mode": "local_and_oidc",
+                    "oidc": {
+                        "issuer": "https://auth.example.com/application/o/openhop/",
+                        "client_id": "openhop",
+                        "client_secret": "oidc-secret",
+                        "authorization": {
+                            "rules": [
+                                {
+                                    "claim": "groups",
+                                    "any_of": ["openhop-admins"],
+                                    "public_key": "safe-public-material",
+                                }
+                            ]
+                        },
+                    },
+                }
+            }
+        }
+    )
+
+    result = api.config_export()
+
+    assert result["success"] is True
+    oidc = result["data"]["config"]["web"]["auth"]["oidc"]
+    assert oidc["client_secret"] == "*** REDACTED ***"
+    assert oidc["client_id"] == "openhop"
+    assert oidc["authorization"]["rules"][0]["public_key"] == "safe-public-material"
+    assert "oidc-secret" not in str(result)
+
+
 def test_config_export_full_backup_includes_hex_keys(cherrypy_ctx):
     request, _ = cherrypy_ctx
     request.method = "GET"
@@ -592,6 +630,19 @@ def test_config_export_full_backup_includes_hex_keys(cherrypy_ctx):
     assert exported["repeater"]["identity_key"] == "aabb"
     assert exported["identities"]["companions"][0]["identity_key"] == "0102"
     assert exported["identities"]["room_servers"][0]["identity_key"] == "0304"
+    assert result["data"]["meta"]["includes_secrets"] is True
+
+
+def test_config_export_full_backup_includes_oidc_client_secret(cherrypy_ctx):
+    request, _ = cherrypy_ctx
+    request.method = "GET"
+
+    api = _make_api({"web": {"auth": {"oidc": {"client_secret": "oidc-secret"}}}})
+
+    result = api.config_export(include_secrets="true")
+
+    assert result["success"] is True
+    assert result["data"]["config"]["web"]["auth"]["oidc"]["client_secret"] == "oidc-secret"
     assert result["data"]["meta"]["includes_secrets"] is True
 
 
@@ -666,6 +717,49 @@ def test_config_import_updates_sections_and_preserves_redacted(cherrypy_ctx):
     assert api.config["repeater"]["identity_key"] == bytes.fromhex("AABBCC")
     assert "identity_file" not in api.config["repeater"]
     assert api.config["identities"]["companions"][0]["identity_key"] == bytes.fromhex("C0FFEE")
+
+
+def test_config_import_preserves_redacted_oidc_client_secret(cherrypy_ctx):
+    request, _ = cherrypy_ctx
+    request.method = "POST"
+
+    api = _make_api(
+        {
+            "web": {
+                "auth": {
+                    "mode": "local_and_oidc",
+                    "oidc": {
+                        "issuer": "https://auth.example.com/application/o/openhop/",
+                        "client_id": "openhop",
+                        "client_secret": "keep-oidc-secret",
+                    },
+                }
+            }
+        }
+    )
+    request.json = {
+        "config": {
+            "web": {
+                "auth": {
+                    "mode": "oidc",
+                    "oidc": {
+                        "issuer": "https://auth.example.com/application/o/openhop/",
+                        "client_id": "openhop-new",
+                        "client_secret": "*** REDACTED ***",
+                    },
+                }
+            }
+        }
+    }
+    api.config_manager.save_to_file.return_value = True
+
+    result = api.config_import()
+
+    assert result["success"] is True
+    oidc = api.config["web"]["auth"]["oidc"]
+    assert api.config["web"]["auth"]["mode"] == "oidc"
+    assert oidc["client_id"] == "openhop-new"
+    assert oidc["client_secret"] == "keep-oidc-secret"
 
 
 def test_openapi_success_sets_content_type(cherrypy_ctx):

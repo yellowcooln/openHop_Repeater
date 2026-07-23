@@ -48,6 +48,31 @@ def test_log_buffer_emit_redacts_sensitive_values():
     assert "raw_message" not in entry
 
 
+def test_log_buffer_emit_redacts_oidc_client_secret_code_and_bearer_token():
+    buf = hs.LogBuffer(max_lines=5)
+    rec = logging.LogRecord(
+        "oidc",
+        logging.INFO,
+        __file__,
+        12,
+        (
+            "callback client_secret=super-secret authorization_code=auth-code-123 "
+            "code=short-code Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig"
+        ),
+        (),
+        None,
+    )
+
+    buf.emit(rec)
+
+    message = buf.logs[0]["message"]
+    assert "super-secret" not in message
+    assert "auth-code-123" not in message
+    assert "short-code" not in message
+    assert "eyJhbGciOiJIUzI1NiJ9.payload.sig" not in message
+    assert message.count("[REDACTED]") >= 4
+
+
 def test_log_buffer_emit_includes_exception_text_without_crashing():
     buf = hs.LogBuffer(max_lines=5)
     try:
