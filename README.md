@@ -17,6 +17,7 @@ integrations.
 - [Supported Hardware](#supported-hardware)
 - [Installation](#installation)
 - [Configuration](#configuration)
+- [Authentication](#authentication)
 - [Policy Engine](#policy-engine)
 - [Upgrading](#upgrading)
 - [Proxmox LXC Installation](#proxmox-lxc-installation)
@@ -234,6 +235,36 @@ glass:
   base_url: "http://localhost:8080"
   inform_interval_seconds: 30
 ```
+
+## Authentication
+
+Local web password login is the default. Optional OIDC login can be enabled for
+Authentik or another standards-compliant provider with `web.auth.mode` set to
+`local_and_oidc` or `oidc`. Start with `local_and_oidc`, verify both an allowed
+member and a denied non-member identity, then switch to `oidc` only after API
+token recovery is working. See [docs/authentik-oidc.md](docs/authentik-oidc.md).
+
+OIDC controls web login only. The MeshCore admin and guest passwords under
+`repeater.security` remain separate protocol credentials and are not replaced by
+OIDC.
+
+Automation and the local CLI can use API tokens. Put the token in an environment
+variable or a protected file; do not pass API tokens as command arguments:
+
+```bash
+export OPENHOP_API_TOKEN="replace-with-api-token"
+pymc-cli --host 127.0.0.1 --port 8000
+```
+
+```bash
+install -m 600 /dev/null ~/.config/openhop/api-token
+printf '%s\n' 'replace-with-api-token' > ~/.config/openhop/api-token
+pymc-cli --api-token-file ~/.config/openhop/api-token
+```
+
+Configuration exports redact secrets by default, including OIDC client secrets.
+Authenticated full backups requested with `include_secrets=true` include secrets
+for restore purposes and must be stored accordingly.
 
 ## Policy Engine
 
