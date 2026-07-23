@@ -698,6 +698,26 @@ web:
   # Allows web frontends from different origins to access the API
   cors_enabled: false
 
+  # Optional web authentication mode. If omitted, openHop uses local password login.
+  # auth:
+  #   mode: local  # local, local_and_oidc, oidc
+  #
+  #   oidc:
+  #     issuer: "https://auth.example.com/application/o/openhop/"
+  #     client_id: "openhop"
+  #     client_secret: "replace-with-client-secret"
+  #     provider_name: "Authentik"
+  #     external_url: "https://repeater.example.com"
+  #     scopes:
+  #       - openid
+  #       - profile
+  #       - email
+  #     authorization:
+  #       rules:
+  #         - claim: groups
+  #           any_of:
+  #             - openhop-admins
+
   # Custom path to web frontend files (optional)
   # If not specified, uses the default built-in path
   # Example: /opt/custom-web-ui or /home/user/my-frontend
