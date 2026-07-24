@@ -169,6 +169,41 @@ def test_stats_app_exposes_compiled_ui_favicon(monkeypatch, tmp_path):
     assert cherrypy.response.headers["Content-Type"] == "image/x-icon"
 
 
+def test_stats_app_injects_discord_embed_from_site_name(monkeypatch, tmp_path):
+    (tmp_path / "index.html").write_text(
+        "<html><head><title>Repeater</title></head><body></body></html>", encoding="utf-8"
+    )
+    fake_api = SimpleNamespace(config_manager=object(), docs=lambda: "d")
+    monkeypatch.setattr(hs, "APIEndpoints", lambda *args, **kwargs: fake_api)
+    app = hs.StatsApp(
+        config={
+            "web": {"web_path": str(tmp_path), "site_name": 'North & <Main> "Repeater"'},
+            "repeater": {"node_name": "fallback-node"},
+        }
+    )
+
+    rendered = app.index()
+
+    assert 'property="og:title" content="North &amp; &lt;Main&gt; &quot;Repeater&quot; | openHop Repeater"' in rendered
+    assert 'property="og:type" content="website"' in rendered
+    assert 'name="twitter:card" content="summary"' in rendered
+    assert "North & <Main>" not in rendered
+
+
+def test_stats_app_embed_falls_back_to_repeater_node_name(monkeypatch, tmp_path):
+    (tmp_path / "index.html").write_text("<html><head></head><body></body></html>", encoding="utf-8")
+    fake_api = SimpleNamespace(config_manager=object(), docs=lambda: "d")
+    monkeypatch.setattr(hs, "APIEndpoints", lambda *args, **kwargs: fake_api)
+    app = hs.StatsApp(
+        config={
+            "web": {"web_path": str(tmp_path), "site_name": "  "},
+            "repeater": {"node_name": "Mesh Hilltop"},
+        }
+    )
+
+    assert 'property="og:title" content="Mesh Hilltop | openHop Repeater"' in app.index()
+
+
 def test_stats_app_index_error_paths(monkeypatch, tmp_path):
     fake_api = SimpleNamespace(config_manager=object(), docs=lambda: "d")
     monkeypatch.setattr(hs, "APIEndpoints", lambda *args, **kwargs: fake_api)

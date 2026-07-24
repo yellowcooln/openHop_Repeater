@@ -1,4 +1,5 @@
 # ruff: noqa: BLE001, DTZ006, UP032, UP035, UP045
+import html as html_lib
 import json
 import logging
 import mimetypes
@@ -283,6 +284,27 @@ class StatsApp:
         current = self._resolve_html_dir()
         return previous != current
 
+    def _inject_link_preview_metadata(self, document: str) -> str:
+        web_config = self.config.get("web", {}) if isinstance(self.config, dict) else {}
+        repeater_config = self.config.get("repeater", {}) if isinstance(self.config, dict) else {}
+        configured_name = str(web_config.get("site_name") or "").strip()
+        node_name = str(repeater_config.get("node_name") or self.node_name or "").strip()
+        display_name = (configured_name or node_name or "openHop Repeater")[:80]
+        title = html_lib.escape(f"{display_name} | openHop Repeater", quote=True)
+        description = html_lib.escape(
+            f"Live status and management for {display_name}, an openHop MeshCore repeater.",
+            quote=True,
+        )
+        metadata = (
+            f'    <meta name="description" content="{description}">\n'
+            f'    <meta property="og:title" content="{title}">\n'
+            f'    <meta property="og:description" content="{description}">\n'
+            '    <meta property="og:type" content="website">\n'
+            '    <meta property="og:site_name" content="openHop Repeater">\n'
+            '    <meta name="twitter:card" content="summary">\n'
+        )
+        return re.sub(r"</head\s*>", metadata + "  </head>", document, count=1, flags=re.IGNORECASE)
+
     def _serve_static_file(self, root_dir: str, relative_parts: tuple[str, ...]):
         if not relative_parts:
             raise cherrypy.NotFound()
@@ -307,7 +329,7 @@ class StatsApp:
         index_path = os.path.join(self.html_dir, "index.html")
         try:
             with open(index_path, "r", encoding="utf-8") as f:
-                return f.read()
+                return self._inject_link_preview_metadata(f.read())
         except FileNotFoundError:
             raise cherrypy.HTTPError(404, "Application not found. Please build the frontend first.")
         except Exception as e:
