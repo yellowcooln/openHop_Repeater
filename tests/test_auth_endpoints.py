@@ -334,6 +334,7 @@ def test_refresh_oidc_caps_expiry_and_requires_reauth(cp_ctx):
     assert out["success"] is True
     assert captured["extra_claims"]["auth_source"] == "oidc"
     assert captured["max_exp"] == oidc_payload["session_exp"]
+    assert 295 <= out["expires_in"] <= 300
 
     expired_payload = dict(oidc_payload, session_exp=int(time.time()) - 1)
     _req, _resp, cfg = cp_ctx(

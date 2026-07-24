@@ -756,6 +756,8 @@ def test_config_import_preserves_redacted_oidc_client_secret(cherrypy_ctx):
     result = api.config_import()
 
     assert result["success"] is True
+    assert result["restart_required"] is True
+    assert result["sections_updated"] == ["web"]
     oidc = api.config["web"]["auth"]["oidc"]
     assert api.config["web"]["auth"]["mode"] == "oidc"
     assert oidc["client_id"] == "openhop-new"

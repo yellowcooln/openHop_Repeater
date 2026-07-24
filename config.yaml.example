@@ -698,49 +698,28 @@ web:
   # Allows web frontends from different origins to access the API
   cors_enabled: false
 
-  # Optional web authentication mode. If omitted, openHop uses local password login.
-  # auth:
-  #   mode: local  # local, local_and_oidc, oidc
-  #
-  #   oidc:
-  #     issuer: "https://auth.example.com/application/o/openhop/"
-  #     client_id: "openhop"
-  #     client_secret: "replace-with-client-secret"
-  #     provider_name: "Authentik"
-  #     external_url: "https://repeater.example.com"
-  #     scopes:
-  #       - openid
-  #       - profile
-  #       - email
-  #     authorization:
-  #       rules:
-  #         - claim: groups
-  #           any_of:
-  #             - openhop-admins
+  auth:
+    # Authentication defaults to local login. Change this to local_and_oidc or
+    # oidc after configuring and uncommenting the OIDC section below.
+    mode: local  # local, local_and_oidc, or oidc
+
+    # oidc:
+    #   issuer: "https://auth.example.com/application/o/openhop/"
+    #   client_id: "openhop"
+    #   client_secret: "replace-with-client-secret"
+    #   provider_name: "Authentik"
+    #   external_url: "https://repeater.example.com"
+    #   scopes:
+    #     - openid
+    #     - profile
+    #     - email
+    #   authorization:
+    #     rules:
+    #       - claim: groups
+    #         any_of:
+    #           - openhop-admins
 
   # Custom path to web frontend files (optional)
   # If not specified, uses the default built-in path
   # Example: /opt/custom-web-ui or /home/user/my-frontend
   # web_path: null
-
-  # Optional web authentication mode. If omitted, local password login remains
-  # the default. OIDC is intended for Authentik or another standards-compliant
-  # OpenID Connect provider.
-  # auth:
-  #   mode: local  # local, local_and_oidc, oidc
-  #
-  #   oidc:
-  #     issuer: "https://auth.example.com/application/o/openhop/"
-  #     client_id: "openhop"
-  #     client_secret: "replace-with-client-secret"
-  #     provider_name: "Authentik"
-  #     external_url: "https://repeater.example.com"
-  #     scopes:
-  #       - openid
-  #       - profile
-  #       - email
-  #     authorization:
-  #       rules:
-  #         - claim: groups
-  #           any_of:
-  #             - openhop-admins

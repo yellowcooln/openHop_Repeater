@@ -488,9 +488,11 @@ class AuthEndpoints:
             payload = user_info.get("payload") or {}
             extra_claims = None
             max_exp = None
+            expires_in = self.jwt_handler.expiry_minutes * 60
             if payload.get("auth_source") == "oidc":
+                now = int(time.time())
                 session_exp = int(payload.get("session_exp") or 0)
-                if session_exp <= int(time.time()):
+                if session_exp <= now:
                     cherrypy.response.status = 401
                     return json.dumps(
                         {
@@ -506,6 +508,7 @@ class AuthEndpoints:
                     if key in payload
                 }
                 max_exp = session_exp
+                expires_in = min(expires_in, session_exp - now)
 
             if extra_claims is None and max_exp is None:
                 new_token = self.jwt_handler.create_jwt(user_info["username"], client_id)
@@ -522,7 +525,7 @@ class AuthEndpoints:
                 {
                     "success": True,
                     "token": new_token,
-                    "expires_in": self.jwt_handler.expiry_minutes * 60,
+                    "expires_in": expires_in,
                     "username": user_info["username"],
                 }
             ).encode("utf-8")

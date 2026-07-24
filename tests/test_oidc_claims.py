@@ -53,6 +53,25 @@ def test_any_of_is_or_with_type_preservation():
     assert result.allowed is True
 
 
+@pytest.mark.parametrize(
+    "claim_value,allowed_value",
+    [(True, 1), (1, True), (False, 0), (0, False), (1, 1.0), (1.0, 1)],
+)
+def test_boolean_and_integer_claim_values_do_not_compare_equal(claim_value, allowed_value):
+    result = evaluate_claim_rules({"value": claim_value}, [rule("value", allowed_value)])
+
+    assert result.allowed is False
+    assert result.reason == "no_match"
+
+
+@pytest.mark.parametrize("claim_value", [None, "", "   ", []])
+def test_empty_claim_values_always_deny(claim_value):
+    result = evaluate_claim_rules({"value": claim_value}, [rule("value", claim_value)])
+
+    assert result.allowed is False
+    assert result.reason == "empty"
+
+
 def test_malformed_claims_deny_without_uncaught_exception():
     result = evaluate_claim_rules(None, [rule("groups", "openhop-admins")])
 

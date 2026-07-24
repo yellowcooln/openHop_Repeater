@@ -1,13 +1,15 @@
 import io
 import json
 from types import SimpleNamespace
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import cherrypy
 import pytest
 
 from repeater.web.auth.oidc_client import NormalizedOIDCIdentity, OIDCProviderError
+from repeater.web.auth.oidc_store import OIDCExchangeRecord
 from repeater.web.auth_endpoints import AuthEndpoints
+from repeater.web.oidc_endpoints import _safe_local_return_path
 
 
 def oidc_config(mode="local_and_oidc"):
@@ -142,7 +144,7 @@ def test_start_callback_exchange_happy_path_and_replay(monkeypatch):
 
     cp_ctx(monkeypatch, params={"client_id": "browser-client", "return_to": "/dashboard"})
     with pytest.raises(cherrypy.HTTPRedirect) as start:
-        auth.oidc.start()
+        auth.oidc.start(client_id="browser-client", return_to="/dashboard")
     assert start.value.urls[0].startswith("https://auth.example.com/authorize?")
     state = start.value.urls[0].split("state=", 1)[1].split("&", 1)[0]
 
@@ -150,9 +152,10 @@ def test_start_callback_exchange_happy_path_and_replay(monkeypatch):
     with pytest.raises(cherrypy.HTTPRedirect) as callback:
         auth.oidc.callback()
     callback_url = urlparse(callback.value.urls[0])
-    assert callback_url.path == "/dashboard"
-    assert callback_url.query.startswith("oidc_exchange=")
-    exchange_code = callback_url.query.split("oidc_exchange=", 1)[1]
+    assert callback_url.path == "/login"
+    callback_query = parse_qs(callback_url.query)
+    assert callback_query["return_to"] == ["/dashboard"]
+    exchange_code = callback_query["oidc_exchange"][0]
     assert fake_client.exchanged == ("auth-code", "verifier")
     assert fake_client.validated[0] == "id-token"
     assert fake_client.validated[1]
@@ -189,6 +192,74 @@ def test_start_rejects_unsafe_return_paths(monkeypatch, return_to):
     with pytest.raises(cherrypy.HTTPError) as exc:
         auth.oidc.start()
     assert exc.value.status == 400
+
+
+@pytest.mark.parametrize(
+    "return_to",
+    [r"/\evil.example", "/%5cevil.example", "/login\r\nLocation: https://evil.example"],
+)
+def test_safe_return_path_rejects_browser_normalization_and_header_injection(return_to):
+    assert _safe_local_return_path(return_to) is False
+
+
+def test_start_and_callback_only_accept_get(monkeypatch):
+    auth = AuthEndpoints(
+        oidc_config(),
+        jwt_handler(),
+        token_manager=object(),
+        oidc_client_factory=lambda _settings: FakeOIDCClient(),
+    )
+
+    cp_ctx(monkeypatch, method="POST", params={"client_id": "browser"})
+    with pytest.raises(cherrypy.HTTPError) as start_error:
+        auth.oidc.start()
+    assert start_error.value.status == 405
+
+    cp_ctx(monkeypatch, method="POST", params={"state": "state", "code": "code"})
+    with pytest.raises(cherrypy.HTTPError) as callback_error:
+        auth.oidc.callback()
+    assert callback_error.value.status == 405
+
+
+def test_exchange_denies_identity_when_upstream_session_expired(monkeypatch):
+    calls = []
+    handler = SimpleNamespace(
+        create_jwt=lambda *args, **kwargs: calls.append((args, kwargs)) or "internal-jwt",
+        expiry_minutes=15,
+    )
+    auth = AuthEndpoints(
+        oidc_config(),
+        handler,
+        token_manager=object(),
+        oidc_client_factory=lambda _settings: FakeOIDCClient(),
+    )
+    exchange = auth.oidc.store.create_exchange(
+        lambda: "expired-code",
+        OIDCExchangeRecord(
+            code="",
+            client_id="browser",
+            identity={
+                "sub": "alice",
+                "oidc_iss": "https://auth.example.com/application/o/openhop/",
+                "oidc_sub": "stable-sub",
+                "session_exp": 1,
+            },
+            expires_at=0,
+        ),
+    )
+    assert exchange is not None
+
+    cp_ctx(
+        monkeypatch,
+        method="POST",
+        body=json.dumps({"code": "expired-code", "client_id": "browser"}).encode(),
+    )
+    result = json.loads(auth.oidc.exchange().decode())
+
+    assert result["success"] is False
+    assert result["error_code"] == "oidc_session_expired"
+    assert cherrypy.response.status == 401
+    assert calls == []
 
 
 def test_callback_provider_failure_redirects_safely(monkeypatch):

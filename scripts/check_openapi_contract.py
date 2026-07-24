@@ -23,16 +23,6 @@ WEB_DIR = ROOT / "repeater" / "web"
 OPENAPI_PATH = WEB_DIR / "openapi.yaml"
 ALLOWLIST_PATH = ROOT / "scripts" / "openapi_contract_allowlist.yaml"
 
-# These endpoints are part of the Authentik OIDC contract and may be documented
-# before the Task 7 endpoint implementation is merged into this worktree.
-PLANNED_AUTH_ENDPOINT_PATHS = {
-    "/auth/methods",
-    "/auth/oidc/start",
-    "/auth/oidc/callback",
-    "/auth/oidc/exchange",
-}
-
-
 @dataclass
 class RouteInfo:
     methods: set[str]
@@ -256,6 +246,8 @@ def _collect_routes() -> dict[str, RouteInfo]:
         (WEB_DIR / "update_endpoints.py", "UpdateAPIEndpoints", ["/update"]),
         # Auth top-level endpoints are mounted at /auth/*
         (WEB_DIR / "auth_endpoints.py", "AuthEndpoints", ["/auth"]),
+        # OIDC protocol endpoints are nested at /auth/oidc/*.
+        (WEB_DIR / "oidc_endpoints.py", "OIDCEndpoints", ["/auth/oidc"]),
         # Token sub-resource is exposed both under /auth and /api/auth in current routing.
         (WEB_DIR / "auth_endpoints.py", "TokensAPIEndpoint", ["/auth/tokens", "/api/auth/tokens"]),
     ]
@@ -296,8 +288,6 @@ def main() -> int:
     for path, spec_methods in sorted(spec.items()):
         code = code_routes.get(path)
         if code is None:
-            if path in PLANNED_AUTH_ENDPOINT_PATHS:
-                continue
             errors.append(f"Missing endpoint in code for OpenAPI path: {path}")
             continue
 

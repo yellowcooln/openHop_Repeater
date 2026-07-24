@@ -7817,6 +7817,9 @@ class APIEndpoints:
                     # current "mqtt_brokers" during restore.
                     section = "mqtt_brokers"
 
+                if section == "web" and isinstance(value, dict) and "auth" in value:
+                    restart_required = True
+
                 if section in {
                     "radio",
                     "sx1262",

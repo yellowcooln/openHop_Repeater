@@ -102,6 +102,43 @@ def test_invalid_discovery_fails_closed(document):
         client.discovery()
 
 
+@pytest.mark.parametrize(
+    "field,url",
+    [
+        ("authorization_endpoint", "http://provider.example/authorize"),
+        ("token_endpoint", "file:///tmp/token"),
+        ("jwks_uri", "http://127.0.0.1/jwks"),
+    ],
+)
+def test_discovery_rejects_insecure_provider_endpoints(field, url):
+    document = {
+        "issuer": "https://auth.example.com/application/o/openhop/",
+        "authorization_endpoint": "https://auth.example.com/authorize",
+        "token_endpoint": "https://auth.example.com/token",
+        "jwks_uri": "https://auth.example.com/jwks",
+    }
+    document[field] = url
+    client = OIDCClient(settings(), http_get=lambda *_args: document)
+
+    with pytest.raises(OIDCProviderError, match="secure absolute URL"):
+        client.discovery()
+
+
+def test_discovery_allows_http_only_for_explicit_loopback_test_issuer():
+    loopback_settings = settings(issuer="http://127.0.0.1:9000/application/o/openhop/")
+    client = OIDCClient(
+        loopback_settings,
+        http_get=lambda *_args: {
+            "issuer": loopback_settings.issuer,
+            "authorization_endpoint": "http://127.0.0.1:9000/authorize",
+            "token_endpoint": "http://127.0.0.1:9000/token",
+            "jwks_uri": "http://127.0.0.1:9000/jwks",
+        },
+    )
+
+    assert client.discovery()["token_endpoint"] == "http://127.0.0.1:9000/token"
+
+
 def test_pkce_and_authorization_url_do_not_request_offline_access():
     client = OIDCClient(settings(scopes=("openid", "profile", "offline_access")))
     verifier, challenge = client.create_pkce()
@@ -168,6 +205,48 @@ def test_validates_id_token_and_claims(signing_key):
     assert identity.session_exp > int(time.time())
 
 
+def test_multiple_audiences_require_matching_authorized_party(signing_key):
+    client = OIDCClient(
+        settings(),
+        http_get=oidc_get_for_jwks({"keys": [jwk_for(signing_key)]}),
+    )
+
+    with pytest.raises(OIDCProviderError, match="authorized party"):
+        client.validate_id_token(
+            id_token(signing_key, aud=["openhop", "another-client"]),
+            nonce="nonce-1",
+        )
+
+    identity = client.validate_id_token(
+        id_token(
+            signing_key,
+            aud=["openhop", "another-client"],
+            azp="openhop",
+        ),
+        nonce="nonce-1",
+    )
+    assert identity.oidc_subject == "stable-sub"
+
+
+@pytest.mark.parametrize("jwk_patch", [{"use": "enc"}, {"alg": "RS512"}])
+def test_rejects_jwk_that_is_not_valid_for_id_token_signature(signing_key, jwk_patch):
+    jwk = jwk_for(signing_key)
+    jwk.update(jwk_patch)
+    client = OIDCClient(settings(), http_get=oidc_get_for_jwks({"keys": [jwk]}))
+
+    with pytest.raises(OIDCProviderError, match="signing key"):
+        client.validate_id_token(id_token(signing_key), nonce="nonce-1")
+
+
+def test_missing_asymmetric_algorithm_backend_fails_cleanly(monkeypatch, signing_key):
+    jwk = jwk_for(signing_key)
+    client = OIDCClient(settings(), http_get=oidc_get_for_jwks({"keys": [jwk]}))
+    monkeypatch.setattr(jwt.algorithms, "get_default_algorithms", dict)
+
+    with pytest.raises(OIDCProviderError, match="algorithm backend unavailable"):
+        client._key_for_header({"alg": "RS256", "kid": "kid-1"})
+
+
 @pytest.mark.parametrize(
     ("claim_patch", "error"),
     [
@@ -215,3 +294,32 @@ def test_rejects_unsupported_alg_and_refreshes_unknown_kid_once(signing_key):
         == "stable-sub"
     )
     assert len(calls) == 2
+
+
+def test_default_http_requests_use_application_user_agent(monkeypatch):
+    requests = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b"{}"
+
+    def fake_urlopen(request, timeout):
+        requests.append((request, timeout))
+        return Response()
+
+    monkeypatch.setattr("repeater.web.auth.oidc_client.urlopen", fake_urlopen)
+
+    OIDCClient._default_get("https://auth.example.com/discovery", 1.5)
+    OIDCClient._default_post("https://auth.example.com/token", {"code": "x"}, 1.5)
+
+    assert len(requests) == 2
+    for request, timeout in requests:
+        assert request.get_header("User-agent") == "openHop-Repeater/1.0 OIDC-Client"
+        assert request.get_header("Accept") == "application/json"
+        assert timeout == 1.5

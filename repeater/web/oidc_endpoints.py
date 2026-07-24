@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 import logging
 import secrets
+import time
 from collections.abc import Callable
-from urllib.parse import urlencode
+from urllib.parse import unquote, urlencode, urlsplit
 
 import cherrypy
 
@@ -40,8 +41,10 @@ class OIDCEndpoints:
         return self._client
 
     @cherrypy.expose
-    def start(self):
+    def start(self, **_kwargs):
         self._require_enabled()
+        if cherrypy.request.method != "GET":
+            raise cherrypy.HTTPError(405, "Method not allowed")
         client_id = str(cherrypy.request.params.get("client_id") or "").strip()
         return_to = str(cherrypy.request.params.get("return_to") or "/").strip() or "/"
         if not client_id:
@@ -77,6 +80,8 @@ class OIDCEndpoints:
     @cherrypy.expose
     def callback(self, **_kwargs):
         self._require_enabled()
+        if cherrypy.request.method != "GET":
+            raise cherrypy.HTTPError(405, "Method not allowed")
         state = str(cherrypy.request.params.get("state") or "")
         code = str(cherrypy.request.params.get("code") or "")
         if not state or not code:
@@ -112,9 +117,14 @@ class OIDCEndpoints:
 
         if exchange is None:
             raise cherrypy.HTTPRedirect("/login?oidc_error=exchange")
-        separator = "&" if "?" in record.return_to else "?"
         raise cherrypy.HTTPRedirect(
-            f"{record.return_to}{separator}{urlencode({'oidc_exchange': exchange.code})}"
+            "/login?"
+            + urlencode(
+                {
+                    "oidc_exchange": exchange.code,
+                    "return_to": record.return_to,
+                }
+            )
         )
 
     @cherrypy.expose
@@ -143,6 +153,18 @@ class OIDCEndpoints:
                 ).encode()
 
             identity = record.identity
+            now = int(time.time())
+            session_exp = int(identity["session_exp"])
+            if session_exp <= now:
+                cherrypy.response.status = 401
+                return json.dumps(
+                    {
+                        "success": False,
+                        "error": "OIDC session expired. Reauthentication required.",
+                        "error_code": "oidc_session_expired",
+                        "reauth_required": True,
+                    }
+                ).encode("utf-8")
             token = self.jwt_handler.create_jwt(
                 identity["sub"],
                 client_id,
@@ -153,13 +175,13 @@ class OIDCEndpoints:
                     "oidc_sub": identity["oidc_sub"],
                     "session_exp": identity["session_exp"],
                 },
-                max_exp=identity["session_exp"],
+                max_exp=session_exp,
             )
             return json.dumps(
                 {
                     "success": True,
                     "token": token,
-                    "expires_in": self.jwt_handler.expiry_minutes * 60,
+                    "expires_in": min(self.jwt_handler.expiry_minutes * 60, session_exp - now),
                     "username": identity["sub"],
                 }
             ).encode("utf-8")
@@ -170,7 +192,17 @@ class OIDCEndpoints:
 
 
 def _safe_local_return_path(return_to: str) -> bool:
-    return return_to.startswith("/") and not return_to.startswith("//")
+    if not return_to or any(ord(character) < 32 for character in return_to):
+        return False
+    parsed = urlsplit(return_to)
+    if parsed.scheme or parsed.netloc or parsed.fragment:
+        return False
+    decoded_path = unquote(parsed.path)
+    return (
+        decoded_path.startswith("/")
+        and not decoded_path.startswith("//")
+        and "\\" not in decoded_path
+    )
 
 
 def _secret() -> str:

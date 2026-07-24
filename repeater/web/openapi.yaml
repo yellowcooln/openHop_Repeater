@@ -155,7 +155,7 @@ paths:
             default: /
           description: Local absolute application path. Values beginning with // are rejected.
       responses:
-        '302':
+        '303':
           description: Redirect to the OIDC provider authorization endpoint
         '400':
           description: Invalid request or unsafe return path
@@ -201,7 +201,7 @@ paths:
             type: string
           description: Provider error code. Details are not reflected to the browser.
       responses:
-        '302':
+        '303':
           description: Redirect to /login with a one-time oidc_exchange code or safe error code
         '400':
           description: Invalid, expired, or replayed callback state
@@ -237,7 +237,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/OIDCExchangeResponse'
         '400':
-          description: Invalid, expired, replayed, or client-mismatched exchange code
+          description: Missing code or client ID
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthError'
+        '401':
+          description: Invalid, expired, replayed, client-mismatched exchange code, or expired upstream session
           content:
             application/json:
               schema:

@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import ipaddress
 import json
 import secrets
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 import jwt
@@ -25,6 +26,7 @@ HttpGet = Callable[[str, float], dict[str, Any]]
 HttpPost = Callable[[str, dict[str, str], float], dict[str, Any]]
 
 ASYMMETRIC_ALGS = {"RS256", "RS384", "RS512", "ES256", "ES384", "ES512"}
+OIDC_HTTP_USER_AGENT = "openHop-Repeater/1.0 OIDC-Client"
 
 
 @dataclass(frozen=True)
@@ -74,9 +76,16 @@ class OIDCClient:
             raise OIDCProviderError("OIDC discovery response malformed")
         if document.get("issuer") != self.settings.issuer:
             raise OIDCProviderError("OIDC discovery issuer mismatch")
+        allow_http_loopback = _is_loopback_url(self.settings.issuer)
         for key in ("authorization_endpoint", "token_endpoint", "jwks_uri"):
             if not isinstance(document.get(key), str) or not document[key]:
                 raise OIDCProviderError(f"OIDC discovery missing {key}")
+            parsed = urlparse(document[key])
+            secure = parsed.scheme == "https" or (
+                allow_http_loopback and parsed.scheme == "http" and _is_loopback_url(document[key])
+            )
+            if not secure or not parsed.netloc or parsed.username or parsed.password:
+                raise OIDCProviderError(f"OIDC discovery {key} must be a secure absolute URL")
 
         self._discovery = dict(document)
         self._discovery_expires_at = now + self.settings.discovery_ttl_seconds
@@ -151,6 +160,14 @@ class OIDCClient:
         if claims.get("nonce") != nonce:
             raise OIDCProviderError("ID token nonce mismatch")
 
+        audiences = claims.get("aud")
+        if (
+            isinstance(audiences, list)
+            and len(audiences) > 1
+            and claims.get("azp") != self.settings.client_id
+        ):
+            raise OIDCProviderError("ID token authorized party mismatch")
+
         claim_result = evaluate_claim_rules(claims, self.settings.authorization_rules)
         if not claim_result.allowed:
             raise OIDCProviderError("OIDC authorization denied")
@@ -176,7 +193,18 @@ class OIDCClient:
             key = _find_jwk(jwks, kid)
         if key is None:
             raise OIDCProviderError("Unknown ID token key id")
-        return jwt.algorithms.get_default_algorithms()[header["alg"]].from_jwk(json.dumps(key))
+        if key.get("use") not in (None, "sig") or key.get("alg") not in (
+            None,
+            header["alg"],
+        ):
+            raise OIDCProviderError("Invalid ID token signing key")
+        algorithm = jwt.algorithms.get_default_algorithms().get(header["alg"])
+        if algorithm is None:
+            raise OIDCProviderError("ID token algorithm backend unavailable")
+        try:
+            return algorithm.from_jwk(json.dumps(key))
+        except Exception as exc:
+            raise OIDCProviderError("Invalid ID token signing key") from exc
 
     def _jwks_document(self, *, force_refresh: bool = False) -> dict[str, Any]:
         now = self._time_fn()
@@ -198,7 +226,13 @@ class OIDCClient:
 
     @staticmethod
     def _default_get(url: str, timeout: float) -> dict[str, Any]:
-        request = Request(url, headers={"Accept": "application/json"})  # nosec B310
+        request = Request(
+            url,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": OIDC_HTTP_USER_AGENT,
+            },
+        )  # nosec B310
         with urlopen(request, timeout=timeout) as response:  # nosec B310
             return json.loads(response.read().decode("utf-8"))
 
@@ -211,6 +245,7 @@ class OIDCClient:
             headers={
                 "Accept": "application/json",
                 "Content-Type": "application/x-www-form-urlencoded",
+                "User-Agent": OIDC_HTTP_USER_AGENT,
             },
             method="POST",
         )
@@ -223,6 +258,18 @@ def _find_jwk(jwks: dict[str, Any], kid: str) -> dict[str, Any] | None:
         if isinstance(key, dict) and key.get("kid") == kid:
             return key
     return None
+
+
+def _is_loopback_url(url: str) -> bool:
+    hostname = urlparse(url).hostname
+    if not hostname:
+        return False
+    if hostname.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
 
 
 def _display_subject(claims: dict[str, Any], oidc_sub: str) -> str:

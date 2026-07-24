@@ -29,13 +29,20 @@ def evaluate_claim_rules(
             return ClaimEvaluationResult(False, "malformed", rule.claim)
         if value is _MISSING:
             return ClaimEvaluationResult(False, "missing", rule.claim)
-        if value == []:
+        if value is None or value == [] or (isinstance(value, str) and not value.strip()):
             return ClaimEvaluationResult(False, "empty", rule.claim)
         values = value if isinstance(value, list) else [value]
-        if not any(candidate == allowed for candidate in values for allowed in rule.any_of):
+        if not any(
+            _same_json_scalar(candidate, allowed) for candidate in values for allowed in rule.any_of
+        ):
             return ClaimEvaluationResult(False, "no_match", rule.claim)
 
     return ClaimEvaluationResult(True)
+
+
+def _same_json_scalar(candidate: Any, allowed: Any) -> bool:
+    """Compare JSON scalar values without Python's bool/int coercion."""
+    return type(candidate) is type(allowed) and candidate == allowed
 
 
 def _get_claim_path(claims: dict[str, Any], path: str) -> Any:
