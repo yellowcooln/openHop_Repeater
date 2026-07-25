@@ -1,3 +1,9 @@
+# This YAML file is the authoritative configuration interface for openHop.
+# All supported daemon settings, including future additions, must remain
+# representable here; the web UI and API are optional convenience interfaces.
+# Runtime records such as API token hashes, packet history, and statistics are
+# data rather than configuration and may use their dedicated stores.
+
 repeater:
   # Node name for logging and identification
   node_name: "mesh-repeater-01"

@@ -168,10 +168,17 @@ The main configuration file is created during installation:
 
 ### Manual Configuration Edits
 
-`config.yaml` remains ordinary YAML and can be edited manually. Native installs
-protect the configuration directory with mode `0700` and the file with mode
-`0600`; both should be owned by `repeater:repeater`. Edit it as the service
-account when possible:
+`config.yaml` is the authoritative, manually editable configuration interface.
+All supported daemon settings—current and future—must remain representable in
+this YAML file and documented in `config.yaml.example`. The web UI and API are
+optional convenience interfaces over the same configuration; adding a setting
+must not make the UI the only way to configure it. Runtime records such as API
+token hashes, packet history, and statistics are data rather than configuration
+and may remain in their dedicated stores.
+
+Native installs protect the configuration directory with mode `0700` and the
+file with mode `0600`; both should be owned by `repeater:repeater`. Edit it as
+the service account when possible:
 
 ```bash
 sudo -u repeater nano /etc/openhop_repeater/config.yaml
