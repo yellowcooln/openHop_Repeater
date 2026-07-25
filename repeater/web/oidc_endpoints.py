@@ -124,8 +124,16 @@ class OIDCEndpoints:
         client_ip = self._client_ip_getter()
         retry_after = self._start_throttle.get_retry_after(client_ip)
         if retry_after:
+            cherrypy.response.status = 429
             cherrypy.response.headers["Retry-After"] = str(retry_after)
-            raise cherrypy.HTTPError(429, "Too many OIDC login attempts")
+            cherrypy.response.headers["Content-Type"] = "application/json"
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": "Too many OIDC login attempts",
+                    "retry_after": retry_after,
+                }
+            ).encode("utf-8")
         self._start_throttle.register_attempt(client_ip)
 
         client = self._client_for_request()

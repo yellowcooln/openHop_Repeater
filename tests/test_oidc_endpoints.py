@@ -325,11 +325,15 @@ def test_oidc_start_throttle_returns_retry_after(monkeypatch):
     )
     req.remote = SimpleNamespace(ip="198.51.100.25")
 
-    with pytest.raises(cherrypy.HTTPError) as exc:
-        auth.oidc.start()
+    result = auth.oidc.start()
 
-    assert exc.value.status == 429
+    assert response.status == 429
     assert response.headers["Retry-After"] == "17"
+    assert json.loads(result) == {
+        "success": False,
+        "error": "Too many OIDC login attempts",
+        "retry_after": 17,
+    }
 
 
 def test_oidc_start_throttle_bounds_each_client_and_recovers_after_window():
