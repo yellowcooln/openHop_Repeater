@@ -55,8 +55,32 @@ Test one Authentik user in `openhop-admins` and one user outside the group. The
 member should enter the dashboard; the non-member should be denied. After that,
 you may change `mode` to `oidc` to disable local web password login.
 
-To recover from a bad OIDC configuration, edit the config file on the device,
-restore `web.auth.mode: local`, and restart the service.
+To recover from a bad OIDC configuration, manually edit the device configuration,
+restore `web.auth.mode: local`, and restart the service. The file remains ordinary
+YAML; hardening restricts access but does not prevent manual edits:
+
+```bash
+sudo -u repeater nano /etc/openhop_repeater/config.yaml
+sudo -u repeater /opt/openhop_repeater/venv/bin/python -c \
+  "import yaml; yaml.safe_load(open('/etc/openhop_repeater/config.yaml'))"
+sudo systemctl restart openhop-repeater
+```
+
+Native installs expect `/etc/openhop_repeater` to be mode `0700` and
+`config.yaml` to be mode `0600`, owned by `repeater:repeater`. If an editor run
+as `root` changes ownership or permissions, restore them before restarting:
+
+```bash
+sudo chown repeater:repeater /etc/openhop_repeater/config.yaml
+sudo chmod 600 /etc/openhop_repeater/config.yaml
+sudo systemctl restart openhop-repeater
+```
+
+Restart promptly after manual changes. The daemon keeps configuration in memory,
+and a later UI/API save could otherwise overwrite an unloaded manual edit with
+older in-memory values. UI/API persistence may also normalize YAML formatting
+and does not preserve comments. See the main README's **Manual Configuration
+Edits** section for the general procedure.
 
 ## Reverse Proxy
 

@@ -166,6 +166,35 @@ The main configuration file is created during installation:
 /etc/openhop_repeater/config.yaml
 ```
 
+### Manual Configuration Edits
+
+`config.yaml` remains ordinary YAML and can be edited manually. Native installs
+protect the configuration directory with mode `0700` and the file with mode
+`0600`; both should be owned by `repeater:repeater`. Edit it as the service
+account when possible:
+
+```bash
+sudo -u repeater nano /etc/openhop_repeater/config.yaml
+sudo -u repeater /opt/openhop_repeater/venv/bin/python -c \
+  "import yaml; yaml.safe_load(open('/etc/openhop_repeater/config.yaml'))"
+sudo systemctl restart openhop-repeater
+```
+
+If you edit the file as `root`, restore its service ownership and private mode
+before restarting:
+
+```bash
+sudo chown repeater:repeater /etc/openhop_repeater/config.yaml
+sudo chmod 600 /etc/openhop_repeater/config.yaml
+sudo systemctl restart openhop-repeater
+```
+
+Restart promptly after a manual edit. The running daemon holds configuration in
+memory; a later save through the web UI or API can otherwise overwrite an
+unloaded manual change with the older in-memory configuration. UI/API saves are
+atomic but may normalize YAML formatting and do not preserve comments, so keep
+important operational notes outside the live configuration file.
+
 ### Setup Wizard
 
 The web-based setup flow guides you through repeater identity, hardware
