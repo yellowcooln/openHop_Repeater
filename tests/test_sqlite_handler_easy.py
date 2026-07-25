@@ -1,4 +1,5 @@
 import base64
+import stat
 import sys
 import types
 from pathlib import Path
@@ -840,3 +841,13 @@ def test_get_metrics_data_applies_requested_gauge_aggregation(
     assert out["metrics"]["avg_snr"] == [expected_snr]
     assert out["metrics"]["avg_length"] == [expected_length]
     assert out["metrics"]["avg_score"] == [expected_score]
+
+
+def test_sqlite_handler_enforces_private_storage_and_database_modes(tmp_path):
+    storage_dir = tmp_path / "storage"
+    storage_dir.mkdir(mode=0o755)
+
+    handler = SQLiteHandler(storage_dir)
+
+    assert stat.S_IMODE(storage_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE(handler.sqlite_path.stat().st_mode) == 0o600

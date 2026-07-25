@@ -90,6 +90,13 @@ def _redact_nested_secrets(value):
     return value
 
 
+def _safe_config_fields(value, allowed_fields: tuple[str, ...]):
+    """Return only explicitly approved non-secret configuration fields."""
+    if not isinstance(value, dict):
+        return {}
+    return {key: value[key] for key in allowed_fields if key in value}
+
+
 def _preserve_redacted_sentinels(imported, current):
     """Replace redacted sentinels in an import with the current same-path value."""
     if imported == REDACTED_SENTINEL:
@@ -1324,7 +1331,7 @@ class APIEndpoints:
             }
         except Exception as e:
             logger.error(f"Error checking setup status: {e}")
-            return {"needs_setup": False, "error": str(e)}
+            return {"needs_setup": False, "error": "Unable to determine setup status"}
 
     @cherrypy.expose
     @cherrypy.tools.json_out()
@@ -1370,7 +1377,7 @@ class APIEndpoints:
             return {"hardware": hardware_list}
         except Exception as e:
             logger.error(f"Error loading hardware options: {e}")
-            return {"error": str(e)}
+            return {"error": "Unable to load hardware options"}
 
     @cherrypy.expose
     @cherrypy.tools.json_out()
@@ -1403,7 +1410,7 @@ class APIEndpoints:
 
         except Exception as e:
             logger.error(f"Error loading radio presets: {e}")
-            return {"error": str(e)}
+            return {"error": "Unable to load radio presets"}
 
     @cherrypy.expose
     @cherrypy.tools.json_out()
@@ -1452,7 +1459,7 @@ class APIEndpoints:
             return self._success(sorted_devices)
         except Exception as e:
             logger.error(f"Error discovering serial ports: {e}")
-            return self._error(str(e))
+            return self._error("Unable to discover serial ports")
 
     @cherrypy.expose
     @cherrypy.tools.json_out()
@@ -1742,7 +1749,8 @@ class APIEndpoints:
             raise
         except Exception as e:
             logger.error(f"Error completing setup wizard: {e}", exc_info=True)
-            return {"success": False, "error": str(e)}
+            cherrypy.response.status = 500
+            return {"success": False, "error": "Unable to complete setup"}
 
     # ============================================================================
     # SYSTEM ENDPOINTS
@@ -1753,14 +1761,65 @@ class APIEndpoints:
     def stats(self):
         try:
             stats = self.stats_getter() if self.stats_getter else {}
+            if "config" in stats:
+                stats["config"] = _redact_nested_secrets(stats["config"])
             # Include active radio configuration in stats so UI can hydrate
             # directly from this endpoint without additional config fetches.
             stats["radio_type"] = self.config.get("radio_type")
-            stats["sx1262"] = self.config.get("sx1262", {})
-            stats["ch341"] = self.config.get("ch341", {})
-            stats["kiss"] = self.config.get("kiss", {})
-            stats["pymc_usb"] = self.config.get("pymc_usb", {})
-            stats["pymc_tcp"] = self.config.get("pymc_tcp", {})
+            stats["sx1262"] = _safe_config_fields(
+                self.config.get("sx1262", {}),
+                (
+                    "bus_id",
+                    "cs_id",
+                    "cs_pin",
+                    "reset_pin",
+                    "busy_pin",
+                    "irq_pin",
+                    "txen_pin",
+                    "rxen_pin",
+                    "en_pin",
+                    "en_pins",
+                    "txled_pin",
+                    "rxled_pin",
+                    "use_dio2_rf",
+                    "use_dio3_tcxo",
+                    "dio3_tcxo_voltage",
+                    "is_waveshare",
+                ),
+            )
+            stats["ch341"] = _safe_config_fields(
+                self.config.get("ch341", {}), ("vid", "pid", "cs_index")
+            )
+            stats["kiss"] = _safe_config_fields(
+                self.config.get("kiss", {}),
+                (
+                    "port",
+                    "baud_rate",
+                    "tx_delay_ms",
+                    "kiss_persistence",
+                    "kiss_slottime_ms",
+                    "kiss_txtail_ms",
+                    "kiss_full_duplex",
+                ),
+            )
+            stats["pymc_usb"] = _safe_config_fields(
+                self.config.get("pymc_usb", {}),
+                ("port", "baudrate", "lbt_enabled", "lbt_max_attempts"),
+            )
+            pymc_tcp = self.config.get("pymc_tcp", {})
+            stats["pymc_tcp"] = _safe_config_fields(
+                pymc_tcp,
+                (
+                    "host",
+                    "port",
+                    "connect_timeout",
+                    "lbt_enabled",
+                    "lbt_max_attempts",
+                ),
+            )
+            stats["pymc_tcp"]["token_configured"] = bool(
+                isinstance(pymc_tcp, dict) and pymc_tcp.get("token")
+            )
             stats["site_name"] = self.config.get("web", {}).get("site_name", "")
             stats["version"] = __version__
             try:
@@ -1777,8 +1836,9 @@ class APIEndpoints:
                     stats["image_version"] = image_info["image_version"]
             return stats
         except Exception as e:
-            logger.error(f"Error serving stats: {e}")
-            return {"error": str(e)}
+            logger.error(f"Error serving stats: {e}", exc_info=True)
+            cherrypy.response.status = 500
+            return {"error": "Unable to load system statistics"}
 
     @cherrypy.expose
     @cherrypy.tools.json_out()

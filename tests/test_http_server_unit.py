@@ -1,5 +1,8 @@
 import io
+import json
 import logging
+import os
+import stat
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -268,6 +271,65 @@ def test_cors_response_headers_allow_bearer_preflight_without_credentials():
     assert "OPTIONS" in headers["Access-Control-Allow-Methods"]
     assert "Authorization" in headers["Access-Control-Allow-Headers"]
     assert "Access-Control-Allow-Credentials" not in headers
+
+
+def test_security_response_headers_are_restrictive():
+    headers = dict(hs._security_response_headers())
+
+    assert headers["X-Content-Type-Options"] == "nosniff"
+    assert headers["X-Frame-Options"] == "DENY"
+    assert headers["Content-Security-Policy"] == "frame-ancestors 'none'"
+    assert headers["Referrer-Policy"] == "no-referrer"
+    assert headers["Permissions-Policy"] == "camera=(), microphone=(), geolocation=()"
+
+
+def test_no_store_response_headers_disable_browser_and_proxy_caching():
+    headers = dict(hs._no_store_response_headers())
+
+    assert headers == {"Cache-Control": "no-store", "Pragma": "no-cache"}
+
+
+def test_json_server_error_does_not_echo_internal_message(monkeypatch, tmp_path):
+    def _fake_init_auth(self):
+        self.jwt_handler = object()
+        self.token_manager = object()
+
+    monkeypatch.setattr(hs.HTTPStatsServer, "_init_auth_handlers", _fake_init_auth)
+    monkeypatch.setattr(
+        hs,
+        "StatsApp",
+        lambda *args, **kwargs: SimpleNamespace(api=SimpleNamespace(config_manager=object())),
+    )
+    monkeypatch.setattr(hs, "AuthEndpoints", lambda *args, **kwargs: object())
+    monkeypatch.setattr(hs, "DocEndpoint", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(cherrypy, "response", SimpleNamespace(headers={}), raising=False)
+    server = hs.HTTPStatsServer(config={}, config_path=str(Path(tmp_path) / "cfg.yml"))
+
+    result = server._json_error_handler("500 Internal Server Error", "secret traceback", "x", "y")
+
+    assert "secret traceback" not in result
+    assert json.loads(result)["error"] == "Internal server error"
+
+
+def test_generated_jwt_secret_uses_atomic_private_config_writer(monkeypatch, tmp_path):
+    config_path = tmp_path / "etc" / "openhop_repeater" / "config.yaml"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text("repeater: {}\n", encoding="utf-8")
+    os.chmod(config_path, 0o644)
+
+    monkeypatch.setattr(hs, "JWTHandler", lambda secret, expiry_minutes: (secret, expiry_minutes))
+    monkeypatch.setattr(hs, "SQLiteHandler", lambda path: path)
+    monkeypatch.setattr(hs, "APITokenManager", lambda storage, secret: (storage, secret))
+    monkeypatch.setattr(hs, "resolve_storage_dir", lambda *_args, **_kwargs: tmp_path / "data")
+
+    server = object.__new__(hs.HTTPStatsServer)
+    server.config = {"repeater": {}}
+    server.config_path = str(config_path)
+    server._init_auth_handlers()
+
+    saved = config_path.read_text(encoding="utf-8")
+    assert "jwt_secret:" in saved
+    assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
 
 
 def test_http_server_passes_oidc_factory_to_auth_endpoints(monkeypatch, tmp_path):

@@ -1,4 +1,5 @@
 import math
+import stat
 
 from repeater.airtime import AirtimeManager
 from repeater.config_manager import ConfigManager
@@ -216,3 +217,15 @@ def test_failed_live_radio_apply_leaves_airtime_manager_unchanged():
 
     assert airtime_mgr.spreading_factor == 7
     assert math.isclose(airtime_mgr.calculate_airtime(50), 97.536, rel_tol=1e-9)
+
+
+def test_save_to_file_enforces_private_directory_and_file_modes(tmp_path):
+    config_dir = tmp_path / "etc" / "openhop_repeater"
+    config_dir.mkdir(parents=True, mode=0o755)
+    config_path = config_dir / "config.yaml"
+    manager = ConfigManager(str(config_path), {"repeater": {"node_name": "test"}})
+
+    assert manager.save_to_file() is True
+
+    assert stat.S_IMODE(config_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE(config_path.stat().st_mode) == 0o600

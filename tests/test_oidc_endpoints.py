@@ -9,7 +9,7 @@ import pytest
 from repeater.web.auth.oidc_client import NormalizedOIDCIdentity, OIDCProviderError
 from repeater.web.auth.oidc_store import OIDCExchangeRecord
 from repeater.web.auth_endpoints import AuthEndpoints
-from repeater.web.oidc_endpoints import _safe_local_return_path
+from repeater.web.oidc_endpoints import _OIDCStartThrottle, _safe_local_return_path
 
 
 def oidc_config(mode="local_and_oidc"):
@@ -152,6 +152,8 @@ def test_start_callback_exchange_happy_path_and_replay(monkeypatch):
     with pytest.raises(cherrypy.HTTPRedirect) as callback:
         auth.oidc.callback()
     callback_url = urlparse(callback.value.urls[0])
+    assert callback_url.scheme == "https"
+    assert callback_url.netloc == "repeater.example.com"
     assert callback_url.path == "/login"
     callback_query = parse_qs(callback_url.query)
     assert callback_query["return_to"] == ["/dashboard"]
@@ -168,6 +170,8 @@ def test_start_callback_exchange_happy_path_and_replay(monkeypatch):
     out = json.loads(auth.oidc.exchange().decode())
     assert out["success"] is True
     assert out["token"] == "internal-jwt"
+    assert cherrypy.response.headers["Cache-Control"] == "no-store"
+    assert cherrypy.response.headers["Pragma"] == "no-cache"
 
     cp_ctx(
         monkeypatch,
@@ -283,5 +287,74 @@ def test_callback_provider_failure_redirects_safely(monkeypatch):
         auth.oidc.callback()
 
     callback_url = urlparse(callback.value.urls[0])
+    assert callback_url.scheme == "https"
+    assert callback_url.netloc == "repeater.example.com"
     assert callback_url.path == "/login"
     assert callback_url.query == "oidc_error=provider"
+
+
+def test_callback_missing_values_uses_configured_https_origin(monkeypatch):
+    auth = AuthEndpoints(
+        oidc_config(),
+        jwt_handler(),
+        token_manager=object(),
+        oidc_client_factory=lambda _settings: FakeOIDCClient(),
+    )
+    cp_ctx(monkeypatch, params={})
+
+    with pytest.raises(cherrypy.HTTPRedirect) as callback:
+        auth.oidc.callback()
+
+    assert callback.value.urls[0] == "https://repeater.example.com/login?oidc_error=callback"
+
+
+def test_oidc_start_throttle_returns_retry_after(monkeypatch):
+    throttle = SimpleNamespace(
+        get_retry_after=lambda _client_ip: 17, register_attempt=lambda _ip: 0
+    )
+    auth = AuthEndpoints(
+        oidc_config(),
+        jwt_handler(),
+        token_manager=object(),
+        oidc_client_factory=lambda _settings: FakeOIDCClient(),
+        oidc_start_throttle=throttle,
+    )
+    req, response = cp_ctx(
+        monkeypatch,
+        params={"client_id": "browser-client", "return_to": "/"},
+    )
+    req.remote = SimpleNamespace(ip="198.51.100.25")
+
+    with pytest.raises(cherrypy.HTTPError) as exc:
+        auth.oidc.start()
+
+    assert exc.value.status == 429
+    assert response.headers["Retry-After"] == "17"
+
+
+def test_oidc_start_throttle_bounds_each_client_and_recovers_after_window():
+    now = [100.0]
+    throttle = _OIDCStartThrottle(
+        per_ip_attempts=2,
+        global_attempts=10,
+        window_seconds=60,
+        time_fn=lambda: now[0],
+    )
+
+    assert throttle.get_retry_after("198.51.100.1") == 0
+    assert throttle.register_attempt("198.51.100.1") == 0
+    assert throttle.register_attempt("198.51.100.1") == 60
+    assert throttle.get_retry_after("198.51.100.2") == 0
+
+    now[0] += 61
+    assert throttle.get_retry_after("198.51.100.1") == 0
+
+
+def test_oidc_start_throttle_does_not_allocate_for_globally_blocked_clients():
+    throttle = _OIDCStartThrottle(per_ip_attempts=10, global_attempts=1, window_seconds=60)
+
+    throttle.register_attempt("198.51.100.1")
+    for index in range(100):
+        assert throttle.get_retry_after(f"203.0.113.{index}") > 0
+
+    assert list(throttle._per_ip) == ["198.51.100.1"]

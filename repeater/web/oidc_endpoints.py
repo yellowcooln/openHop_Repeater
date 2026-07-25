@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import secrets
+import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from urllib.parse import unquote, urlencode, urlsplit
 
@@ -16,6 +19,68 @@ from .auth.oidc_store import OIDCExchangeRecord, OIDCFlowRecord, OneTimeOIDCStor
 logger = logging.getLogger(__name__)
 
 
+def _set_no_store() -> None:
+    cherrypy.response.headers["Cache-Control"] = "no-store"
+    cherrypy.response.headers["Pragma"] = "no-cache"
+
+
+class _OIDCStartThrottle:
+    """Bound anonymous OIDC starts per client and globally."""
+
+    def __init__(
+        self,
+        per_ip_attempts: int = 10,
+        global_attempts: int = 100,
+        window_seconds: int = 60,
+        time_fn=None,
+    ):
+        self.per_ip_attempts = per_ip_attempts
+        self.global_attempts = global_attempts
+        self.window_seconds = window_seconds
+        self._time_fn = time_fn or time.monotonic
+        self._lock = threading.Lock()
+        self._per_ip: dict[str, deque] = {}
+        self._global = deque()
+
+    def _trim(self, values: deque, now: float) -> None:
+        cutoff = now - self.window_seconds
+        while values and values[0] <= cutoff:
+            values.popleft()
+
+    def _retry_after_locked(self, client_ip: str, now: float) -> int:
+        self._trim(self._global, now)
+        per_ip = self._per_ip.get(client_ip)
+        if per_ip is not None:
+            self._trim(per_ip, now)
+            if not per_ip:
+                self._per_ip.pop(client_ip, None)
+                per_ip = None
+        waits = []
+        if per_ip is not None and len(per_ip) >= self.per_ip_attempts:
+            waits.append(per_ip[0] + self.window_seconds - now)
+        if len(self._global) >= self.global_attempts:
+            waits.append(self._global[0] + self.window_seconds - now)
+        return max(0, math.ceil(max(waits, default=0)))
+
+    def get_retry_after(self, client_ip: str) -> int:
+        with self._lock:
+            return self._retry_after_locked(client_ip or "unknown", self._time_fn())
+
+    def register_attempt(self, client_ip: str) -> int:
+        client_ip = client_ip or "unknown"
+        with self._lock:
+            now = self._time_fn()
+            self._trim(self._global, now)
+            for key, values in list(self._per_ip.items()):
+                self._trim(values, now)
+                if not values:
+                    self._per_ip.pop(key, None)
+            per_ip = self._per_ip.setdefault(client_ip, deque())
+            per_ip.append(now)
+            self._global.append(now)
+            return self._retry_after_locked(client_ip, now)
+
+
 class OIDCEndpoints:
     def __init__(
         self,
@@ -23,11 +88,15 @@ class OIDCEndpoints:
         jwt_handler,
         store: OneTimeOIDCStore | None = None,
         oidc_client_factory: Callable | None = None,
+        start_throttle=None,
+        client_ip_getter: Callable[[], str] | None = None,
     ):
         self.auth_settings = auth_settings
         self.jwt_handler = jwt_handler
         self.store = store or OneTimeOIDCStore(ttl_seconds=300, exchange_ttl_seconds=60)
         self._oidc_client_factory = oidc_client_factory or OIDCClient
+        self._start_throttle = start_throttle or _OIDCStartThrottle()
+        self._client_ip_getter = client_ip_getter or (lambda: "unknown")
         self._client = None
 
     def _require_enabled(self):
@@ -51,6 +120,13 @@ class OIDCEndpoints:
             raise cherrypy.HTTPError(400, "client_id is required")
         if not _safe_local_return_path(return_to):
             raise cherrypy.HTTPError(400, "return_to must be an application-local path")
+
+        client_ip = self._client_ip_getter()
+        retry_after = self._start_throttle.get_retry_after(client_ip)
+        if retry_after:
+            cherrypy.response.headers["Retry-After"] = str(retry_after)
+            raise cherrypy.HTTPError(429, "Too many OIDC login attempts")
+        self._start_throttle.register_attempt(client_ip)
 
         client = self._client_for_request()
         verifier, challenge = client.create_pkce()
@@ -85,11 +161,11 @@ class OIDCEndpoints:
         state = str(cherrypy.request.params.get("state") or "")
         code = str(cherrypy.request.params.get("code") or "")
         if not state or not code:
-            raise cherrypy.HTTPRedirect("/login?oidc_error=callback")
+            raise cherrypy.HTTPRedirect(self._login_url("oidc_error=callback"))
 
         record = self.store.consume_flow(state)
         if not record:
-            raise cherrypy.HTTPRedirect("/login?oidc_error=state")
+            raise cherrypy.HTTPRedirect(self._login_url("oidc_error=state"))
 
         try:
             client = self._client_for_request()
@@ -113,22 +189,30 @@ class OIDCEndpoints:
             logger.warning(
                 "OIDC callback failed for provider %s", self.auth_settings.oidc.provider_name
             )
-            raise cherrypy.HTTPRedirect("/login?oidc_error=provider")
+            raise cherrypy.HTTPRedirect(self._login_url("oidc_error=provider"))
 
         if exchange is None:
-            raise cherrypy.HTTPRedirect("/login?oidc_error=exchange")
+            raise cherrypy.HTTPRedirect(self._login_url("oidc_error=exchange"))
         raise cherrypy.HTTPRedirect(
-            "/login?"
-            + urlencode(
-                {
-                    "oidc_exchange": exchange.code,
-                    "return_to": record.return_to,
-                }
+            self._login_url(
+                urlencode(
+                    {
+                        "oidc_exchange": exchange.code,
+                        "return_to": record.return_to,
+                    }
+                )
             )
         )
 
+    def _login_url(self, query: str) -> str:
+        settings = self.auth_settings.oidc
+        if settings is None:
+            raise cherrypy.HTTPError(404, "OIDC authentication is not enabled")
+        return f"{settings.external_url}/login?{query}"
+
     @cherrypy.expose
     def exchange(self):
+        _set_no_store()
         cherrypy.response.headers["Content-Type"] = "application/json"
         self._require_enabled()
         if cherrypy.request.method != "POST":

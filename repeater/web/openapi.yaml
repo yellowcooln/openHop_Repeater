@@ -163,6 +163,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/AuthError'
+        '429':
+          description: OIDC login starts are temporarily rate limited
+          headers:
+            Retry-After:
+              description: Seconds before another OIDC login start may be attempted
+              schema:
+                type: integer
+                minimum: 1
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthError'
         '503':
           description: OIDC provider unavailable or OIDC login not configured
           content:

@@ -18,6 +18,7 @@ import cherrypy
 import cherrypy_cors
 
 from repeater.config import resolve_storage_dir
+from repeater.config_manager import ConfigManager
 from repeater.data_acquisition import SQLiteHandler
 
 from .api_endpoints import APIEndpoints
@@ -62,6 +63,22 @@ def _cors_response_headers(
         ("Access-Control-Allow-Methods", methods),
         ("Access-Control-Allow-Headers", "Authorization, Content-Type, X-API-Key"),
     ]
+
+
+def _security_response_headers() -> list[tuple[str, str]]:
+    """Return baseline browser hardening headers for every HTTP surface."""
+    return [
+        ("X-Content-Type-Options", "nosniff"),
+        ("X-Frame-Options", "DENY"),
+        ("Content-Security-Policy", "frame-ancestors 'none'"),
+        ("Referrer-Policy", "no-referrer"),
+        ("Permissions-Policy", "camera=(), microphone=(), geolocation=()"),
+    ]
+
+
+def _no_store_response_headers() -> list[tuple[str, str]]:
+    """Prevent token and secret responses from being cached."""
+    return [("Cache-Control", "no-store"), ("Pragma", "no-cache")]
 
 
 def _looks_like_cheroot_makefile_context(unraisable: object) -> bool:
@@ -425,8 +442,8 @@ class HTTPStatsServer:
     def _init_auth_handlers(self):
         """Initialize JWT handler and API token manager."""
         # Get or generate JWT secret from repeater.security
-        repeater_config = self.config.get("repeater", {})
-        security_config = repeater_config.get("security", {})
+        repeater_config = self.config.setdefault("repeater", {})
+        security_config = repeater_config.setdefault("security", {})
         jwt_secret = security_config.get("jwt_secret", "")
 
         if not jwt_secret:
@@ -436,23 +453,17 @@ class HTTPStatsServer:
                 "No JWT secret found in config, auto-generated one. Please save this to config.yaml:"
             )
 
-            # Try to save to config if config_path is available
+            # Persist through the same atomic private writer used by runtime config changes.
+            security_config["jwt_secret"] = jwt_secret
             if self.config_path:
                 try:
-                    import yaml
-
-                    with open(self.config_path, "r") as f:
-                        config_data = yaml.safe_load(f) or {}
-
-                    if "repeater" not in config_data:
-                        config_data["repeater"] = {}
-                    if "security" not in config_data["repeater"]:
-                        config_data["repeater"]["security"] = {}
-                    config_data["repeater"]["security"]["jwt_secret"] = jwt_secret
-
-                    with open(self.config_path, "w") as f:
-                        yaml.dump(config_data, f, default_flow_style=False)
-
+                    manager = ConfigManager(
+                        self.config_path,
+                        self.config,
+                        daemon_instance=getattr(self, "daemon_instance", None),
+                    )
+                    if not manager.save_to_file():
+                        raise RuntimeError("atomic config save returned false")
                     logger.info(f"Saved auto-generated JWT secret to {self.config_path}")
                 except Exception as e:
                     logger.error(f"Failed to save JWT secret to config: {e}")
@@ -482,9 +493,10 @@ class HTTPStatsServer:
         logger.info("CORS support enabled with Authorization header")
 
     def _json_error_handler(self, status, message, traceback, version):
-        """Return JSON error responses instead of HTML for API endpoints"""
+        """Return sanitized JSON error responses instead of CherryPy tracebacks."""
         cherrypy.response.headers["Content-Type"] = "application/json"
-        return json.dumps({"success": False, "error": message})
+        public_message = "Internal server error" if str(status).startswith("500") else message
+        return json.dumps({"success": False, "error": public_message})
 
     def start(self):
 
@@ -501,6 +513,9 @@ class HTTPStatsServer:
             config = {
                 "/": {
                     "tools.sessions.on": False,
+                    "request.show_tracebacks": False,
+                    "tools.response_headers.on": True,
+                    "tools.response_headers.headers": _security_response_headers(),
                     # "tools.gzip.on": True,
                     # "tools.gzip.mime_types": ["application/json", "text/html", "text/plain"],
                     # Ensure proper content types for static files
@@ -515,6 +530,28 @@ class HTTPStatsServer:
                 # Require authentication for all /api endpoints
                 "/api": {
                     "tools.require_auth.on": True,
+                },
+                # Authentication, token, stats, and backup responses must never be cached.
+                "/api/auth": {
+                    "tools.response_headers.on": True,
+                    "tools.response_headers.headers": [
+                        *_security_response_headers(),
+                        *_no_store_response_headers(),
+                    ],
+                },
+                "/api/stats": {
+                    "tools.response_headers.on": True,
+                    "tools.response_headers.headers": [
+                        *_security_response_headers(),
+                        *_no_store_response_headers(),
+                    ],
+                },
+                "/api/config_export": {
+                    "tools.response_headers.on": True,
+                    "tools.response_headers.headers": [
+                        *_security_response_headers(),
+                        *_no_store_response_headers(),
+                    ],
                 },
                 # Enable gzip for bulk packet downloads
                 "/api/bulk_packets": {
@@ -588,7 +625,10 @@ class HTTPStatsServer:
                 cors_config = {
                     "cors.expose.on": True,
                     "tools.response_headers.on": True,
-                    "tools.response_headers.headers": _cors_response_headers(),
+                    "tools.response_headers.headers": [
+                        *_security_response_headers(),
+                        *_cors_response_headers(),
+                    ],
                     # Disable automatic trailing slash redirects to prevent CORS issues
                     "tools.trailing_slash.on": False,
                 }
@@ -609,6 +649,7 @@ class HTTPStatsServer:
                     "server.socket_port": self.port,
                     "server.socket_queue_size": socket_queue_size,
                     "engine.autoreload.on": False,
+                    "request.show_tracebacks": False,
                     "log.screen": False,
                     "log.access_file": "",  # Disable access log file
                     "log.error_file": "",  # Disable error log file
@@ -645,6 +686,8 @@ class HTTPStatsServer:
                     "tools.response_headers.on": True,
                     "tools.response_headers.headers": [
                         ("Content-Type", "application/json"),
+                        *_security_response_headers(),
+                        *_no_store_response_headers(),
                     ],
                     # Disable automatic trailing slash redirects
                     "tools.trailing_slash.on": False,
@@ -664,6 +707,7 @@ class HTTPStatsServer:
                     "tools.response_headers.on": True,
                     "tools.response_headers.headers": [
                         ("Content-Type", "text/html; charset=utf-8"),
+                        *_security_response_headers(),
                     ],
                     "tools.trailing_slash.on": False,
                 }

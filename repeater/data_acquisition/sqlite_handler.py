@@ -2,6 +2,7 @@ import base64
 import json
 import logging
 import math
+import os
 import secrets
 import sqlite3
 import threading
@@ -15,6 +16,8 @@ logger = logging.getLogger("SQLiteHandler")
 class SQLiteHandler:
     def __init__(self, storage_dir: Path):
         self.storage_dir = storage_dir
+        self.storage_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(self.storage_dir, 0o700)
         self.sqlite_path = self.storage_dir / "repeater.db"
         self._api_token_last_used_updates = {}
         self._api_token_last_used_interval_sec = 300
@@ -74,6 +77,7 @@ class SQLiteHandler:
         conn = getattr(self._local, "conn", None)
         if conn is None:
             conn = sqlite3.connect(str(self.sqlite_path))
+            os.chmod(self.sqlite_path, 0o600)
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA busy_timeout=5000")

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, mock_open, patch
 import cherrypy
 import pytest
 
-from repeater.web.api_endpoints import APIEndpoints
+from repeater.web.api_endpoints import REDACTED_SENTINEL, APIEndpoints
 
 
 def _make_api(config=None):
@@ -1603,6 +1603,103 @@ def test_stats_includes_versions_and_buildroot_image_info(cherrypy_ctx):
     assert out["version"]
     assert out["image_name"] == "pyMC"
     assert out["image_version"] == "1.2.3"
+
+
+def test_stats_exposes_only_safe_radio_connection_fields(cherrypy_ctx):
+    del cherrypy_ctx
+    sentinel = "SENTINEL-REUSABLE-SECRET"
+    api = _make_api(
+        {
+            "radio_type": "pymc_tcp",
+            "kiss": {
+                "port": "/dev/ttyUSB0",
+                "baud_rate": 9600,
+                "tx_delay_ms": 25,
+                "kiss_persistence": 255,
+                "kiss_slottime_ms": 100,
+                "kiss_txtail_ms": 10,
+                "kiss_full_duplex": False,
+                "password": sentinel,
+            },
+            "pymc_usb": {
+                "port": "/dev/ttyACM0",
+                "baudrate": 921600,
+                "lbt_enabled": True,
+                "lbt_max_attempts": 5,
+                "token": sentinel,
+            },
+            "sx1262": {
+                "use_dio2_rf": True,
+                "use_dio3_tcxo": True,
+                "dio3_tcxo_voltage": 1.8,
+                "is_waveshare": False,
+                "password": sentinel,
+            },
+            "pymc_tcp": {
+                "host": "modem.local",
+                "port": 5055,
+                "connect_timeout": 5,
+                "lbt_enabled": True,
+                "token": sentinel,
+            },
+        }
+    )
+    api.stats_getter = lambda: {
+        "config": {
+            "web": {"auth": {"jwt_secret": sentinel}},
+            "mqtt_brokers": {"brokers": [{"password": sentinel, "host": "mqtt.local"}]},
+        }
+    }
+
+    out = api.stats()
+
+    assert sentinel not in str(out)
+    assert out["config"]["web"]["auth"]["jwt_secret"] == REDACTED_SENTINEL
+    assert out["config"]["mqtt_brokers"]["brokers"][0]["password"] == REDACTED_SENTINEL
+    assert out["sx1262"] == {
+        "use_dio2_rf": True,
+        "use_dio3_tcxo": True,
+        "dio3_tcxo_voltage": 1.8,
+        "is_waveshare": False,
+    }
+    assert out["kiss"] == {
+        "port": "/dev/ttyUSB0",
+        "baud_rate": 9600,
+        "tx_delay_ms": 25,
+        "kiss_persistence": 255,
+        "kiss_slottime_ms": 100,
+        "kiss_txtail_ms": 10,
+        "kiss_full_duplex": False,
+    }
+    assert out["pymc_usb"] == {
+        "port": "/dev/ttyACM0",
+        "baudrate": 921600,
+        "lbt_enabled": True,
+        "lbt_max_attempts": 5,
+    }
+    assert out["pymc_tcp"] == {
+        "host": "modem.local",
+        "port": 5055,
+        "connect_timeout": 5,
+        "lbt_enabled": True,
+        "token_configured": True,
+    }
+
+
+def test_stats_failure_returns_generic_500(cherrypy_ctx):
+    _request, response = cherrypy_ctx
+    sentinel = "SENTINEL-INTERNAL-STATS-ERROR"
+    api = _make_api()
+
+    def fail_stats():
+        raise RuntimeError(sentinel)
+
+    api.stats_getter = fail_stats
+    out = api.stats()
+
+    assert response.status == 500
+    assert out == {"error": "Unable to load system statistics"}
+    assert sentinel not in str(out)
 
 
 def test_gps_snapshot_when_service_present_and_default_when_absent(cherrypy_ctx):

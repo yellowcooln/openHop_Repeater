@@ -1,5 +1,6 @@
 import logging
 import os
+import tempfile
 from typing import Any, Dict, List, Optional
 
 import yaml
@@ -242,19 +243,37 @@ class ConfigManager:
             True if successful, False otherwise
         """
         try:
-            os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
-            with open(self.config_path, "w") as f:
-                # Use safe_dump with explicit width to prevent line wrapping
-                # Setting width to a very large number prevents truncation of long strings like identity keys
-                yaml.safe_dump(
-                    self.config,
-                    f,
-                    default_flow_style=False,
-                    indent=2,
-                    width=1000000,  # Very large width to prevent any line wrapping
-                    sort_keys=False,
-                    allow_unicode=True,
-                )
+            config_dir = os.path.dirname(os.path.abspath(self.config_path))
+            os.makedirs(config_dir, mode=0o700, exist_ok=True)
+            os.chmod(config_dir, 0o700)
+            fd, temporary_path = tempfile.mkstemp(prefix=".config-", suffix=".yaml", dir=config_dir)
+            try:
+                os.fchmod(fd, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    # Use safe_dump with explicit width to prevent line wrapping.
+                    yaml.safe_dump(
+                        self.config,
+                        f,
+                        default_flow_style=False,
+                        indent=2,
+                        width=1000000,
+                        sort_keys=False,
+                        allow_unicode=True,
+                    )
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(temporary_path, self.config_path)
+                os.chmod(self.config_path, 0o600)
+            except Exception:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                try:
+                    os.unlink(temporary_path)
+                except FileNotFoundError:
+                    pass
+                raise
             logger.info(f"Configuration saved to {self.config_path}")
             return True
         except Exception as e:

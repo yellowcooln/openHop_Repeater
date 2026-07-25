@@ -3,6 +3,7 @@
 Authentication endpoints for login and token management
 """
 
+import ipaddress
 import json
 import logging
 import math
@@ -232,33 +233,46 @@ class AuthEndpoints:
         config_manager=None,
         login_throttle=None,
         oidc_client_factory=None,
+        oidc_start_throttle=None,
     ):
         self.config = config
         self.jwt_handler = jwt_handler
         self.token_manager = token_manager
         self.config_manager = config_manager
         self._login_throttle = login_throttle or _LoginThrottle()
+        http_config = config.get("http", {}) if isinstance(config, dict) else {}
+        raw_trusted_proxies = (
+            http_config.get("trusted_proxies", []) if isinstance(http_config, dict) else []
+        )
+        self._trusted_proxies = set()
+        if isinstance(raw_trusted_proxies, list):
+            for value in raw_trusted_proxies:
+                try:
+                    self._trusted_proxies.add(str(ipaddress.ip_address(str(value).strip())))
+                except ValueError:
+                    logger.warning("Ignoring invalid http.trusted_proxies entry")
         self.auth_settings = normalize_auth_settings(config)
         self.oidc = OIDCEndpoints(
             self.auth_settings,
             jwt_handler,
             oidc_client_factory=oidc_client_factory,
+            start_throttle=oidc_start_throttle,
+            client_ip_getter=self._get_request_ip,
         )
 
-    @staticmethod
-    def _get_request_ip() -> str:
-        """Extract client IP for login throttling/auditing."""
+    def _get_request_ip(self) -> str:
+        """Extract client IP only from explicitly trusted reverse proxies."""
+        remote = getattr(cherrypy.request, "remote", None)
+        remote_ip = str(remote.ip) if remote and getattr(remote, "ip", None) else "unknown"
         xff = cherrypy.request.headers.get("X-Forwarded-For", "")
-        if xff:
+        if xff and remote_ip in self._trusted_proxies:
             first = xff.split(",", 1)[0].strip()
             if first:
-                return first
-
-        remote = getattr(cherrypy.request, "remote", None)
-        if remote and getattr(remote, "ip", None):
-            return str(remote.ip)
-
-        return "unknown"
+                try:
+                    return str(ipaddress.ip_address(first))
+                except ValueError:
+                    logger.warning("Ignoring invalid X-Forwarded-For client address")
+        return remote_ip
 
     @cherrypy.expose
     @cherrypy.tools.json_out()

@@ -677,8 +677,18 @@ http:
   enabled: true
 
   # Listen address and port for the web UI/API server.
+  # If the reverse proxy runs on this host, bind to 127.0.0.1. If the proxy is
+  # on another LAN host, keep a reachable bind address and firewall this port so
+  # only that proxy can connect.
   host: "0.0.0.0"
   port: 8000
+
+  # Immediate reverse proxies that may supply X-Forwarded-For for login and
+  # OIDC rate limiting. Exact IP addresses only. Forwarding headers from every
+  # other peer are ignored. Leave empty for direct/LAN-only access.
+  trusted_proxies: []
+  # trusted_proxies:
+  #   - "192.168.1.10"
 
   # CherryPy worker/thread tuning.
   # thread_pool is the initial worker count (minimum enforced by server: 2).

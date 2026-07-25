@@ -32,6 +32,7 @@ StandardError=journal
 SyslogIdentifier=openhop-repeater
 
 # Security (relaxed for service self-restart via sudo)
+UMask=0077
 ReadWritePaths=/var/log/openhop_repeater /var/lib/openhop_repeater /etc/openhop_repeater
 SupplementaryGroups=plugdev dialout
 

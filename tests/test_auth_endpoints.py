@@ -244,6 +244,32 @@ def test_login_throttle_backoff(cp_ctx):
     assert out["success"] is False
 
 
+def test_request_ip_ignores_forwarded_header_from_untrusted_peer(cp_ctx):
+    auth = AuthEndpoints(
+        config={"http": {"trusted_proxies": ["192.0.2.10"]}},
+        jwt_handler=_jwt_handler(ok=True),
+        token_manager=_token_mgr(),
+    )
+    request, _response, _cfg = cp_ctx(headers={"X-Forwarded-For": "198.51.100.8"})
+    request.remote = SimpleNamespace(ip="192.0.2.99")
+
+    assert auth._get_request_ip() == "192.0.2.99"
+
+
+def test_request_ip_accepts_forwarded_header_from_trusted_peer(cp_ctx):
+    auth = AuthEndpoints(
+        config={"http": {"trusted_proxies": ["192.0.2.10"]}},
+        jwt_handler=_jwt_handler(ok=True),
+        token_manager=_token_mgr(),
+    )
+    request, _response, _cfg = cp_ctx(headers={"X-Forwarded-For": "198.51.100.8, 192.0.2.10"})
+    request.remote = SimpleNamespace(ip="192.0.2.10")
+    assert auth._get_request_ip() == "198.51.100.8"
+
+    request.headers["X-Forwarded-For"] = "not-an-ip, 192.0.2.10"
+    assert auth._get_request_ip() == "192.0.2.10"
+
+
 @pytest.mark.asyncio
 async def test_verify_requires_get_and_auth(cp_ctx):
     auth = AuthEndpoints(config={}, jwt_handler=_jwt_handler(ok=True), token_manager=_token_mgr())

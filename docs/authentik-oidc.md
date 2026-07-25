@@ -61,9 +61,23 @@ restore `web.auth.mode: local`, and restart the service.
 ## Reverse Proxy
 
 The externally visible URL must be HTTPS and must match `external_url`. openHop
-builds its callback URL from this configured value, not from `Host` or forwarded
-headers. Preserve HTTPS at the public edge and do not expose the backend as an
-alternate route that bypasses the identity provider.
+builds its callback URL and all browser callback completion/error redirects from
+this configured value, not from `Host` or forwarded scheme headers. Preserve
+HTTPS at the public edge and do not expose the backend as an alternate route
+that bypasses the identity provider.
+
+Configure only the immediate reverse proxy as trusted for client-IP throttling:
+
+```yaml
+http:
+  trusted_proxies:
+    - "192.168.1.10"
+```
+
+Exact IP addresses are supported. Forwarding headers from every other peer are
+ignored. The proxy must overwrite, rather than append to, client-supplied
+`X-Forwarded-For`. When the proxy runs on the repeater, bind `http.host` to
+`127.0.0.1`; when it runs elsewhere, firewall port 8000 to that proxy only.
 
 ## CLI And API Tokens
 
