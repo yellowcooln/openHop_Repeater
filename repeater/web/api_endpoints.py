@@ -7958,7 +7958,12 @@ class APIEndpoints:
                     ik = value.get("identity_key")
                     if ik and isinstance(ik, str) and ik != REDACTED_SENTINEL:
                         try:
-                            value["identity_key"] = bytes.fromhex(ik)
+                            imported_identity_key = bytes.fromhex(ik)
+                            if imported_identity_key != self.config.get("repeater", {}).get(
+                                "identity_key"
+                            ):
+                                restart_required = True
+                            value["identity_key"] = imported_identity_key
                         except ValueError:
                             logger.warning("Config import: invalid identity_key hex, skipping")
                             value.pop("identity_key", None)
@@ -7967,6 +7972,9 @@ class APIEndpoints:
                     value.pop("identity_file", None)
 
                 if section == "identities" and isinstance(value, dict):
+                    # IdentityManager, helpers, and companion servers are built at
+                    # startup; updating their config alone cannot replace them live.
+                    restart_required = True
                     # Preserve identity keys that are redacted
                     for id_section in ("room_servers", "companions"):
                         entries = value.get(id_section, []) or []

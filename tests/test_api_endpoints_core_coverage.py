@@ -1195,6 +1195,26 @@ def test_authenticated_backup_restore_does_not_choose_bootstrap_completion(cherr
     assert "setup" not in api.config
 
 
+def test_config_import_repeater_identity_requires_restart(cherrypy_ctx):
+    request, _ = cherrypy_ctx
+    request.method = "POST"
+    api = _make_api({"repeater": {"identity_key": bytes.fromhex("11" * 32)}})
+    api.config_manager.update_and_save.return_value = {"ok": True}
+    api.config_manager.save_to_file.return_value = True
+    request.json = {
+        "config": {
+            "repeater": {
+                "identity_key": "22" * 32,
+            }
+        }
+    }
+
+    result = api.config_import()
+
+    assert result["success"] is True
+    assert result["restart_required"] is True
+
+
 def test_authenticated_security_import_advances_epoch(cherrypy_ctx, monkeypatch):
     request, _ = cherrypy_ctx
     request.method = "POST"
@@ -1683,6 +1703,7 @@ def test_config_import_identity_redaction_preserves_by_name_for_room_servers(che
     result = api.config_import()
 
     assert result["success"] is True
+    assert result["restart_required"] is True
     rooms = api.config["identities"]["room_servers"]
     by_name = {r["name"]: r["identity_key"] for r in rooms}
     assert by_name["main-room"] == bytes.fromhex("ABCD")
