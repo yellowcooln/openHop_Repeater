@@ -301,6 +301,7 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
             "allow_read_only": False,
             "jwt_secret": None,
             "jwt_expiry_minutes": 60,
+            "security_epoch": 0,
         }
 
     # Only auto-generate identity_key if not provided under repeater section

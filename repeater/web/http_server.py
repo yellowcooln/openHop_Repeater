@@ -26,6 +26,7 @@ from .auth.api_tokens import APITokenManager
 from .auth.cherrypy_tool import register_require_auth_tool
 from .auth.jwt_handler import JWTHandler
 from .auth.oidc_client import OIDCClient
+from .auth.security_epoch import get_security_epoch
 from .auth_endpoints import AuthEndpoints
 
 # WebSocket support
@@ -470,7 +471,11 @@ class HTTPStatsServer:
 
         # Initialize JWT handler with configurable expiry (default 1 hour)
         jwt_expiry_minutes = security_config.get("jwt_expiry_minutes", 60)
-        self.jwt_handler = JWTHandler(jwt_secret, expiry_minutes=jwt_expiry_minutes)
+        self.jwt_handler = JWTHandler(
+            jwt_secret,
+            expiry_minutes=jwt_expiry_minutes,
+            security_epoch=get_security_epoch(self.config),
+        )
         logger.info(f"JWT handler initialized (token expiry: {jwt_expiry_minutes} minutes)")
 
         # Initialize API token manager

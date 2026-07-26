@@ -109,6 +109,7 @@ def test_wizard_pymc_usb_defaults(wizard_env):
 
     written = _read_yaml(config_path)
     assert written["setup"]["completed"] is True
+    assert written["repeater"]["security"]["security_epoch"] == 1
     assert written["radio_type"] == "pymc_usb"
     assert written["pymc_usb"]["port"] == "/dev/ttyACM0"
     assert written["pymc_usb"]["baudrate"] == 921600

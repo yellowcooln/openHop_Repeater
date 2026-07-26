@@ -187,14 +187,19 @@ def test_stats_app_injects_discord_embed_from_site_name(monkeypatch, tmp_path):
 
     rendered = app.index()
 
-    assert 'property="og:title" content="North &amp; &lt;Main&gt; &quot;Repeater&quot; | openHop Repeater"' in rendered
+    assert (
+        'property="og:title" content="North &amp; &lt;Main&gt; &quot;Repeater&quot; | openHop Repeater"'
+        in rendered
+    )
     assert 'property="og:type" content="website"' in rendered
     assert 'name="twitter:card" content="summary"' in rendered
     assert "North & <Main>" not in rendered
 
 
 def test_stats_app_embed_falls_back_to_repeater_node_name(monkeypatch, tmp_path):
-    (tmp_path / "index.html").write_text("<html><head></head><body></body></html>", encoding="utf-8")
+    (tmp_path / "index.html").write_text(
+        "<html><head></head><body></body></html>", encoding="utf-8"
+    )
     fake_api = SimpleNamespace(config_manager=object(), docs=lambda: "d")
     monkeypatch.setattr(hs, "APIEndpoints", lambda *args, **kwargs: fake_api)
     app = hs.StatsApp(
@@ -317,7 +322,11 @@ def test_generated_jwt_secret_uses_atomic_private_config_writer(monkeypatch, tmp
     config_path.write_text("repeater: {}\n", encoding="utf-8")
     os.chmod(config_path, 0o644)
 
-    monkeypatch.setattr(hs, "JWTHandler", lambda secret, expiry_minutes: (secret, expiry_minutes))
+    monkeypatch.setattr(
+        hs,
+        "JWTHandler",
+        lambda secret, expiry_minutes, security_epoch: (secret, expiry_minutes, security_epoch),
+    )
     monkeypatch.setattr(hs, "SQLiteHandler", lambda path: path)
     monkeypatch.setattr(hs, "APITokenManager", lambda storage, secret: (storage, secret))
     monkeypatch.setattr(hs, "resolve_storage_dir", lambda *_args, **_kwargs: tmp_path / "data")

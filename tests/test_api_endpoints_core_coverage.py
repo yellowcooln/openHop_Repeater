@@ -1188,6 +1188,46 @@ def test_first_run_backup_restore_marks_setup_complete(cherrypy_ctx):
     assert api.config["setup"]["completed"] is True
 
 
+def test_authenticated_security_import_advances_epoch(cherrypy_ctx, monkeypatch):
+    request, _ = cherrypy_ctx
+    request.method = "POST"
+    request.user = {"username": "admin", "auth_type": "jwt"}
+    api = _make_api(
+        {
+            "repeater": {
+                "node_name": "mesh-repeater-01",
+                "security": {
+                    "admin_password": "old-password",
+                    "security_epoch": 9,
+                },
+            },
+            "web": {"auth": {"mode": "local"}},
+            "radio_type": "none",
+        }
+    )
+    api.config_manager.save_to_file.return_value = True
+    jwt_handler = MagicMock()
+    monkeypatch.setattr(cherrypy, "config", {"jwt_handler": jwt_handler}, raising=False)
+    request.json = {
+        "config": {
+            "repeater": {
+                "node_name": "mesh-repeater-01",
+                "security": {
+                    "admin_password": "new-password",
+                    "security_epoch": -50,
+                },
+            },
+            "web": {"auth": {"mode": "oidc"}},
+        }
+    }
+
+    result = api.config_import()
+
+    assert result["success"] is True
+    assert api.config["repeater"]["security"]["security_epoch"] == 10
+    jwt_handler.set_security_epoch.assert_called_once_with(10)
+
+
 def test_validate_config_options_and_method_guard(cherrypy_ctx):
     request, response = cherrypy_ctx
     api = _make_api({"web": {"cors_enabled": True}})
@@ -1315,6 +1355,33 @@ def test_update_web_config_options_no_updates_success_failure(cherrypy_ctx):
     fail = api.update_web_config()
     assert fail["success"] is False
     assert fail["error"] == "bad"
+
+
+def test_update_auth_config_advances_security_epoch(cherrypy_ctx, monkeypatch):
+    request, _ = cherrypy_ctx
+    request.method = "POST"
+    request.json = {"web": {"auth": {"mode": "oidc"}}}
+    api = _make_api(
+        {
+            "repeater": {"security": {"security_epoch": 11}},
+            "web": {"auth": {"mode": "local"}},
+        }
+    )
+    api.config_manager.update_and_save.return_value = {"success": True, "saved": True}
+    jwt_handler = MagicMock()
+    monkeypatch.setattr(cherrypy, "config", {"jwt_handler": jwt_handler}, raising=False)
+
+    result = api.update_web_config()
+
+    assert result["success"] is True
+    api.config_manager.update_and_save.assert_called_once_with(
+        updates={
+            "web": {"auth": {"mode": "oidc"}},
+            "repeater": {"security": {"security_epoch": 12}},
+        },
+        live_update=False,
+    )
+    jwt_handler.set_security_epoch.assert_called_once_with(12)
 
 
 def test_update_web_config_requires_post_and_handles_exception(cherrypy_ctx):

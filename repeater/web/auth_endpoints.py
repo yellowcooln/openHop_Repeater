@@ -14,6 +14,12 @@ import cherrypy
 
 from .auth.config import normalize_auth_settings
 from .auth.middleware import require_auth
+from .auth.security_epoch import (
+    SECURITY_EPOCH_KEY,
+    next_security_epoch,
+    set_security_epoch,
+    sync_jwt_handler_epoch,
+)
 from .oidc_endpoints import OIDCEndpoints
 
 logger = logging.getLogger(__name__)
@@ -653,17 +659,33 @@ class AuthEndpoints:
                     {"success": False, "error": "Current password is incorrect"}
                 ).encode("utf-8")
 
-            # Update password in config
-            if "repeater" not in self.config:
-                self.config["repeater"] = {}
-            if "security" not in self.config["repeater"]:
-                self.config["repeater"]["security"] = {}
+            # Update the password and persisted JWT security epoch as one transaction.
+            security_config = self.config.setdefault("repeater", {}).setdefault("security", {})
+            old_password = security_config.get("admin_password")
+            old_epoch_present = SECURITY_EPOCH_KEY in security_config
+            old_epoch = security_config.get(SECURITY_EPOCH_KEY)
+            new_epoch = next_security_epoch(self.config)
+            security_config["admin_password"] = new_password
+            set_security_epoch(self.config, new_epoch)
 
-            self.config["repeater"]["security"]["admin_password"] = new_password
+            def rollback_security_change():
+                security_config["admin_password"] = old_password
+                if old_epoch_present:
+                    security_config[SECURITY_EPOCH_KEY] = old_epoch
+                else:
+                    security_config.pop(SECURITY_EPOCH_KEY, None)
 
-            # Save to config file using ConfigManager
+            # Save to config file using ConfigManager. Do not invalidate the live
+            # handler until the new password and epoch are durably persisted.
             if self.config_manager:
-                if self.config_manager.save_to_file():
+                try:
+                    saved = self.config_manager.save_to_file()
+                except Exception:
+                    rollback_security_change()
+                    raise
+
+                if saved:
+                    sync_jwt_handler_epoch(self.jwt_handler, new_epoch)
                     logger.info(f"Admin password changed successfully by user {user['username']}")
                     return json.dumps(
                         {
@@ -672,11 +694,13 @@ class AuthEndpoints:
                         }
                     ).encode("utf-8")
                 else:
+                    rollback_security_change()
                     cherrypy.response.status = 500
                     return json.dumps(
                         {"success": False, "error": "Failed to save password to config file"}
                     ).encode("utf-8")
             else:
+                rollback_security_change()
                 cherrypy.response.status = 500
                 return json.dumps(
                     {"success": False, "error": "Config manager not available"}

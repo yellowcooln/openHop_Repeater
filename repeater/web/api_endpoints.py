@@ -4,6 +4,7 @@ import os
 import re
 import secrets
 import time
+from copy import deepcopy
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from datetime import datetime, timezone
 from typing import Callable, Optional
@@ -32,6 +33,12 @@ from repeater.setup_state import legacy_setup_status, migrate_legacy_setup_compl
 from repeater.utils_packet import create_scoped_advert_packet
 
 from .auth.middleware import require_auth
+from .auth.security_epoch import (
+    get_security_epoch,
+    next_security_epoch,
+    set_security_epoch,
+    sync_jwt_handler_epoch,
+)
 from .auth_endpoints import AuthAPIEndpoints
 from .cad_calibration_engine import CADCalibrationEngine
 from .companion_endpoints import CompanionAPIEndpoints
@@ -1536,6 +1543,8 @@ class APIEndpoints:
             if "security" not in config_yaml["repeater"]:
                 config_yaml["repeater"]["security"] = {}
             config_yaml["repeater"]["security"]["admin_password"] = admin_password
+            wizard_security_epoch = get_security_epoch(config_yaml) + 1
+            set_security_epoch(config_yaml, wizard_security_epoch)
 
             # Update radio settings - convert MHz/kHz to Hz (used for both SX1262 and KISS modem)
             if "radio" not in config_yaml:
@@ -1694,6 +1703,7 @@ class APIEndpoints:
             # Write updated config
             with open(self._config_path, "w") as f:
                 yaml.dump(config_yaml, f, default_flow_style=False, sort_keys=False)
+            sync_jwt_handler_epoch(cherrypy.config.get("jwt_handler"), wizard_security_epoch)
 
             logger.info(
                 f"Setup wizard completed: node_name={node_name}, hardware={hardware_key}, freq={freq_mhz}MHz"
@@ -2323,11 +2333,29 @@ class APIEndpoints:
             if not updates:
                 return self._error("No configuration updates provided")
 
+            web_updates = updates.get("web", {}) if isinstance(updates, dict) else {}
+            repeater_updates = updates.get("repeater", {}) if isinstance(updates, dict) else {}
+            auth_security_changed = (
+                isinstance(web_updates, dict)
+                and "auth" in web_updates
+                or isinstance(repeater_updates, dict)
+                and "security" in repeater_updates
+            )
+            security_epoch = None
+            if auth_security_changed:
+                security_epoch = next_security_epoch(self.config)
+                updates = deepcopy(updates)
+                updates.setdefault("repeater", {}).setdefault("security", {})["security_epoch"] = (
+                    security_epoch
+                )
+
             # Use ConfigManager to update and save configuration
             # Persist web changes first, then apply to running HTTP server.
             result = self.config_manager.update_and_save(updates=updates, live_update=False)
 
             if result.get("success"):
+                if security_epoch is not None:
+                    sync_jwt_handler_epoch(cherrypy.config.get("jwt_handler"), security_epoch)
                 live_applied = False
                 frontend_switched = False
                 app = (
@@ -7809,6 +7837,12 @@ class APIEndpoints:
             if not imported_config or not isinstance(imported_config, dict):
                 return self._error("Missing or invalid 'config' object in request body")
 
+            config_before_import = deepcopy(self.config)
+            original_security_epoch = get_security_epoch(self.config)
+            original_security = deepcopy(self.config.get("repeater", {}).get("security", {}))
+            original_security.pop("security_epoch", None)
+            original_auth = deepcopy(self.config.get("web", {}).get("auth", {}))
+
             # Sections we allow to be imported
             ALLOWED_SECTIONS = {
                 "repeater",
@@ -7908,20 +7942,47 @@ class APIEndpoints:
             if not updated_sections:
                 return self._error("No valid configuration sections found in import")
 
+            imported_security = self.config.get("repeater", {}).get("security", {})
+            current_security = (
+                deepcopy(imported_security) if isinstance(imported_security, dict) else {}
+            )
+            current_security.pop("security_epoch", None)
+            current_auth = deepcopy(self.config.get("web", {}).get("auth", {}))
+            auth_security_changed = (
+                current_security != original_security or current_auth != original_auth
+            )
+            security_epoch = None
+            incoming_security = imported_config.get("repeater", {}).get("security", {})
+            imported_epoch_present = (
+                isinstance(incoming_security, dict) and "security_epoch" in incoming_security
+            )
+            if auth_security_changed:
+                security_epoch = original_security_epoch + 1
+                set_security_epoch(self.config, security_epoch)
+            elif imported_epoch_present:
+                # Imported backups cannot choose or roll back the local JWT boundary.
+                set_security_epoch(self.config, original_security_epoch)
+
             if not request_user:
                 restored_needs_setup, _ = legacy_setup_status(self.config)
                 if not restored_needs_setup:
                     self.config.setdefault("setup", {})["completed"] = True
 
-            # Persist and live-reload
+            # Persist before invalidating the live handler or applying live updates.
+            saved = self.config_manager.save_to_file()
+            if not saved:
+                self.config.clear()
+                self.config.update(config_before_import)
+                return self._error("Failed to save imported configuration")
+
+            if security_epoch is not None:
+                sync_jwt_handler_epoch(cherrypy.config.get("jwt_handler"), security_epoch)
+
             self.config_manager.update_and_save(
-                updates={},  # Already applied above
+                updates={},  # Already applied and persisted above
                 live_update=True,
                 live_update_sections=updated_sections,
             )
-
-            # Save to file (update_and_save with empty updates may not save)
-            saved = self.config_manager.save_to_file()
 
             return {
                 "success": True,

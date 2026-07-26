@@ -57,6 +57,20 @@ def test_jwt_handler_extra_claims_reserved_protection_and_max_exp():
             h.create_jwt("alice", "client-1", extra_claims={reserved: "bad"})
 
 
+def test_jwt_handler_rejects_tokens_from_an_older_security_epoch():
+    h = JWTHandler("test-secret-key-minimum-32-bytes!!", expiry_minutes=15, security_epoch=4)
+    old_token = h.create_jwt("admin", "client-1")
+
+    assert h.verify_jwt(old_token)["security_epoch"] == 4
+
+    h.set_security_epoch(5)
+
+    assert h.verify_jwt(old_token) is None
+    assert h.verify_jwt(h.create_jwt("admin", "client-1"))["security_epoch"] == 5
+    with pytest.raises(ValueError, match="reserved"):
+        h.create_jwt("admin", "client-1", extra_claims={"security_epoch": 4})
+
+
 def test_api_token_manager_happy_paths_and_revoke_false():
     db = SimpleNamespace(
         create_api_token=MagicMock(return_value=10),

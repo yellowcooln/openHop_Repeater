@@ -148,6 +148,10 @@ repeater:
     # Controls how long users stay logged in before needing to re-authenticate
     jwt_expiry_minutes: 60
 
+    # Incremented automatically after password or authentication-boundary changes.
+    # JWTs issued under an older epoch are rejected immediately.
+    security_epoch: 0
+
 # Policy engine configuration file.
 # Relative paths are resolved from this config file directory.
 policy:

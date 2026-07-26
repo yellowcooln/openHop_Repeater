@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import cherrypy
 import pytest
 
+from repeater.web.auth.jwt_handler import JWTHandler
 from repeater.web.auth_endpoints import (
     AuthAPIEndpoints,
     AuthEndpoints,
@@ -467,6 +468,76 @@ def test_change_password_paths(cp_ctx):
     out = json.loads(auth_fail_save.change_password().decode())
     assert out["success"] is False
     assert cherrypy.response.status == 500
+
+
+def test_password_change_invalidates_existing_jwts(cp_ctx):
+    handler = JWTHandler("test-secret-key-minimum-32-bytes!!", security_epoch=7)
+    old_token = handler.create_jwt("admin", "browser")
+    config = {
+        "repeater": {
+            "security": {
+                "admin_password": "old-password",
+                "security_epoch": 7,
+            }
+        }
+    }
+    auth = AuthEndpoints(
+        config=config,
+        jwt_handler=handler,
+        token_manager=_token_mgr(),
+        config_manager=SimpleNamespace(save_to_file=MagicMock(return_value=True)),
+    )
+    _req, _resp, cfg = cp_ctx(
+        method="POST",
+        headers={"Authorization": f"Bearer {old_token}"},
+        body=json.dumps(
+            {"current_password": "old-password", "new_password": "new-password"}
+        ).encode(),
+    )
+    cfg["jwt_handler"] = handler
+    cfg["token_manager"] = _token_mgr()
+
+    result = json.loads(auth.change_password().decode())
+
+    assert result["success"] is True
+    assert config["repeater"]["security"]["security_epoch"] == 8
+    assert handler.verify_jwt(old_token) is None
+    assert handler.verify_jwt(handler.create_jwt("admin", "browser")) is not None
+
+
+def test_failed_password_save_preserves_existing_jwts_and_password(cp_ctx):
+    handler = JWTHandler("test-secret-key-minimum-32-bytes!!", security_epoch=3)
+    old_token = handler.create_jwt("admin", "browser")
+    config = {
+        "repeater": {
+            "security": {
+                "admin_password": "old-password",
+                "security_epoch": 3,
+            }
+        }
+    }
+    auth = AuthEndpoints(
+        config=config,
+        jwt_handler=handler,
+        token_manager=_token_mgr(),
+        config_manager=SimpleNamespace(save_to_file=MagicMock(return_value=False)),
+    )
+    _req, _resp, cfg = cp_ctx(
+        method="POST",
+        headers={"Authorization": f"Bearer {old_token}"},
+        body=json.dumps(
+            {"current_password": "old-password", "new_password": "new-password"}
+        ).encode(),
+    )
+    cfg["jwt_handler"] = handler
+    cfg["token_manager"] = _token_mgr()
+
+    result = json.loads(auth.change_password().decode())
+
+    assert result["success"] is False
+    assert config["repeater"]["security"]["admin_password"] == "old-password"
+    assert config["repeater"]["security"]["security_epoch"] == 3
+    assert handler.verify_jwt(old_token) is not None
 
 
 def test_protected_auth_urls_block_unauthenticated_access(cp_ctx):
