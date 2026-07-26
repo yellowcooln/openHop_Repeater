@@ -3147,7 +3147,8 @@ paths:
 
         **Security:**
         - Radio messages cannot use server key (blocked)
-        - API messages can use server key (for announcements)
+        - `server`/`system` announcements require an administrator JWT session
+        - API tokens may post only with an explicit client public key
 
         **Rate Limits:**
         - 10 messages/minute per author_pubkey
@@ -3278,6 +3279,12 @@ paths:
                   value:
                     success: false
                     error: "message is required"
+        '403':
+          description: API tokens cannot post server/system announcements
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
   /room_stats:
     get:

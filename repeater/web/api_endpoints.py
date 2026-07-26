@@ -7273,32 +7273,37 @@ class APIEndpoints:
             if not author_pubkey:
                 return self._error("author_pubkey is required")
 
+            is_server_message = isinstance(author_pubkey, str) and author_pubkey.lower() in (
+                "server",
+                "system",
+            )
+            request_user = getattr(cherrypy.request, "user", None) or {}
+            if is_server_message and request_user.get("auth_type") != "jwt":
+                raise cherrypy.HTTPError(
+                    403,
+                    "Server announcements require an authenticated administrator session",
+                )
+
             # Convert author_pubkey to bytes
             try:
                 # Special case: "server" or "system" = use room server's public key
                 # This allows clients to identify which room server sent the message
-                if isinstance(author_pubkey, str) and author_pubkey.lower() in ("server", "system"):
+                if is_server_message:
                     # Get room server first to access its identity
                     room_info = self._get_room_server_by_name_or_hash(room_name, room_hash)
                     room_server = room_info["room_server"]
                     # Use the room server's actual public key
                     author_bytes = room_server.local_identity.get_public_key()
                     author_pubkey = author_bytes.hex()
-                    is_server_message = True
                 elif isinstance(author_pubkey, str):
                     author_bytes = bytes.fromhex(author_pubkey)
-                    is_server_message = False
                 else:
                     author_bytes = bytes(author_pubkey)
-                    is_server_message = False
             except Exception as e:
                 return self._error(f"Invalid author_pubkey: {e}")
 
             # Get room server (if not already retrieved above)
-            if not isinstance(author_pubkey, str) or author_pubkey.lower() not in (
-                "server",
-                "system",
-            ):
+            if not is_server_message:
                 room_info = self._get_room_server_by_name_or_hash(room_name, room_hash)
                 room_server = room_info["room_server"]
 
@@ -7307,8 +7312,7 @@ class APIEndpoints:
 
             if self.event_loop:
                 sender_timestamp = int(time.time())
-                # SECURITY: Server messages (using room server's key) go to ALL clients
-                # API is allowed to send these (TODO: Add authentication/authorization)
+                # Server messages use the room server's key and go to all clients.
                 future = asyncio.run_coroutine_threadsafe(
                     room_server.add_post(
                         client_pubkey=author_bytes,
