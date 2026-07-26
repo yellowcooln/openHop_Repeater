@@ -1158,6 +1158,36 @@ def test_config_import_invalid_identity_key_hex_is_skipped(cherrypy_ctx):
     assert "identity_key" not in api.config["repeater"]
 
 
+def test_first_run_backup_restore_marks_setup_complete(cherrypy_ctx):
+    request, _ = cherrypy_ctx
+    request.method = "POST"
+    api = _make_api(
+        {
+            "repeater": {
+                "node_name": "mesh-repeater-01",
+                "security": {"admin_password": "admin123"},
+            },
+            "radio_type": None,
+        }
+    )
+    api.config_manager.update_and_save.return_value = {"ok": True}
+    api.config_manager.save_to_file.return_value = True
+    request.json = {
+        "config": {
+            "repeater": {
+                "node_name": "restored-node",
+                "security": {"admin_password": "restored-secret"},
+            },
+            "radio_type": "pymc_tcp",
+        }
+    }
+
+    result = api.config_import()
+
+    assert result["success"] is True
+    assert api.config["setup"]["completed"] is True
+
+
 def test_validate_config_options_and_method_guard(cherrypy_ctx):
     request, response = cherrypy_ctx
     api = _make_api({"web": {"cors_enabled": True}})

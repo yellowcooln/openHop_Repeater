@@ -108,6 +108,7 @@ def test_wizard_pymc_usb_defaults(wizard_env):
     assert result["config"]["pymc_usb_baudrate"] == 921600
 
     written = _read_yaml(config_path)
+    assert written["setup"]["completed"] is True
     assert written["radio_type"] == "pymc_usb"
     assert written["pymc_usb"]["port"] == "/dev/ttyACM0"
     assert written["pymc_usb"]["baudrate"] == 921600
@@ -231,6 +232,62 @@ def test_wizard_rejected_after_setup_complete(wizard_env):
 
     assert result["success"] is False
     assert "already complete" in result["error"].lower()
+
+
+def test_explicit_completion_keeps_setup_closed_when_radio_is_disabled(wizard_env):
+    _tmp_path, _config_path, endpoints, _set_request = wizard_env
+    config = {
+        "setup": {"completed": True},
+        "repeater": {"node_name": "configured", "security": {"admin_password": "verysecret"}},
+        "radio_type": None,
+    }
+
+    needs_setup, reasons = endpoints._setup_status_from_config(config)
+
+    assert needs_setup is False
+    assert reasons["radio_not_configured"] is True
+
+
+def test_explicit_incomplete_flag_keeps_first_run_open(wizard_env):
+    _tmp_path, _config_path, endpoints, _set_request = wizard_env
+    config = {
+        "setup": {"completed": False},
+        "repeater": {"node_name": "configured", "security": {"admin_password": "verysecret"}},
+        "radio_type": "pymc_tcp",
+    }
+
+    needs_setup, reasons = endpoints._setup_status_from_config(config)
+
+    assert needs_setup is True
+    assert reasons["radio_not_configured"] is False
+
+
+def test_legacy_completed_config_is_migrated_once(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config = {
+        "repeater": {"node_name": "configured", "security": {"admin_password": "verysecret"}},
+        "radio_type": "pymc_tcp",
+    }
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    APIEndpoints(config=config, config_path=str(config_path))
+
+    assert config["setup"]["completed"] is True
+    assert _read_yaml(config_path)["setup"]["completed"] is True
+
+
+def test_legacy_first_run_config_is_not_migrated(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config = {
+        "repeater": {"node_name": "mesh-repeater-01", "security": {"admin_password": "admin123"}},
+        "radio_type": None,
+    }
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    APIEndpoints(config=config, config_path=str(config_path))
+
+    assert "setup" not in config
+    assert "setup" not in _read_yaml(config_path)
 
 
 def test_wizard_rejects_short_admin_password(wizard_env):

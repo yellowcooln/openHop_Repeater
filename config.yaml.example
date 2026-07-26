@@ -4,6 +4,13 @@
 # Runtime records such as API token hashes, packet history, and statistics are
 # data rather than configuration and may use their dedicated stores.
 
+# First-run setup state. The setup wizard changes this to true. If you configure
+# the YAML manually, set it true only after the node name, admin password, and
+# radio hardware are ready. Once true, disabling the radio does not reopen the
+# public setup endpoints.
+setup:
+  completed: false
+
 repeater:
   # Node name for logging and identification
   node_name: "mesh-repeater-01"

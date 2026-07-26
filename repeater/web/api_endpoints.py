@@ -28,6 +28,7 @@ from repeater.companion.utils import (
 from repeater.config import resolve_storage_dir
 from repeater.policy_engine import PolicyEngine
 from repeater.service_utils import get_buildroot_image_info
+from repeater.setup_state import legacy_setup_status, migrate_legacy_setup_completion, setup_status
 from repeater.utils_packet import create_scoped_advert_packet
 
 from .auth.middleware import require_auth
@@ -297,6 +298,15 @@ class APIEndpoints:
         self.config_manager = ConfigManager(
             config_path=self._config_path, config=self.config, daemon_instance=daemon_instance
         )
+        if (
+            config_path
+            and os.path.isfile(self._config_path)
+            and migrate_legacy_setup_completion(self.config)
+        ):
+            if self.config_manager.save_to_file():
+                logger.info("Migrated legacy configuration to explicit setup completion")
+            else:
+                logger.error("Failed to persist explicit setup completion migration")
 
         # Create nested auth object for /api/auth/* routes
         self.auth = AuthAPIEndpoints()
@@ -665,22 +675,7 @@ class APIEndpoints:
 
     def _setup_status_from_config(self, config: dict) -> tuple[bool, dict]:
         """Return whether first-run setup should still be available."""
-        node_name = config.get("repeater", {}).get("node_name", "")
-        has_default_name = node_name in ["mesh-repeater-01", ""]
-
-        admin_password = config.get("repeater", {}).get("security", {}).get("admin_password", "")
-        has_default_password = admin_password in ["admin123", ""]
-
-        radio_type_raw = config.get("radio_type")
-        radio_type = "" if radio_type_raw is None else str(radio_type_raw).lower().strip()
-        radio_not_configured = radio_type in ("", "none", "null", "disabled", "off", "no_radio")
-
-        reasons = {
-            "default_name": has_default_name,
-            "default_password": has_default_password,
-            "radio_not_configured": radio_not_configured,
-        }
-        return has_default_name or has_default_password or radio_not_configured, reasons
+        return setup_status(config)
 
     def _default_policy_document(self) -> dict:
         return {
@@ -1692,6 +1687,10 @@ class APIEndpoints:
                     config_yaml["sx1262"]["use_gpiod_backend"] = hw_config.get(
                         "use_gpiod_backend", False
                     )
+            # Completing setup is explicit and remains complete if the radio is
+            # later disabled for maintenance or receive-only operation.
+            config_yaml.setdefault("setup", {})["completed"] = True
+
             # Write updated config
             with open(self._config_path, "w") as f:
                 yaml.dump(config_yaml, f, default_flow_style=False, sort_keys=False)
@@ -7908,6 +7907,11 @@ class APIEndpoints:
 
             if not updated_sections:
                 return self._error("No valid configuration sections found in import")
+
+            if not request_user:
+                restored_needs_setup, _ = legacy_setup_status(self.config)
+                if not restored_needs_setup:
+                    self.config.setdefault("setup", {})["completed"] = True
 
             # Persist and live-reload
             self.config_manager.update_and_save(
