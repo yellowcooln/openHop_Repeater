@@ -682,9 +682,9 @@ class CompanionAPIEndpoints:
     def events(self, **kwargs):
         """GET /api/companion/events — Server-Sent Events stream for push callbacks.
 
-        Connect with ``EventSource('/api/companion/events?token=JWT')``.
-        Auth is handled by the CherryPy tool-level require_auth (supports
-        query-param JWT tokens needed by the browser EventSource API).
+        Browser clients first obtain an endpoint-bound ticket, then connect with
+        ``EventSource('/api/companion/events?ticket=OPAQUE')``. Clients able to
+        set headers may use Authorization or X-API-Key directly.
         """
         self._ensure_callbacks()
 

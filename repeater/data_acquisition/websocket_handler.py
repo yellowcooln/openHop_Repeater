@@ -39,10 +39,11 @@ class PacketWebSocket(WebSocket):
 
         params = parse_qs(qs)
         ticket = params.get("ticket", [None])[0]
-        token = params.get("token", [None])[0]
         client_id = params.get("client_id", [None])[0]
 
         api_key = self.environ.get("HTTP_X_API_KEY", "") if hasattr(self, "environ") else ""
+        auth_header = self.environ.get("HTTP_AUTHORIZATION", "") if hasattr(self, "environ") else ""
+        bearer_token = auth_header[7:] if auth_header.startswith("Bearer ") else ""
 
         ticket_manager = cherrypy.config.get("stream_ticket_manager")
         if ticket and ticket_manager:
@@ -67,14 +68,14 @@ class PacketWebSocket(WebSocket):
             self.close(code=1011, reason="server configuration error")
             return
 
-        if not token and not api_key and not ticket:
+        if not bearer_token and not api_key and not ticket:
             logger.warning("WebSocket connection rejected: missing token")
             self.close(code=1008, reason="unauthorized")
             return
 
-        if token:
+        if bearer_token:
             try:
-                payload = jwt_handler.verify_jwt(token)
+                payload = jwt_handler.verify_jwt(bearer_token)
                 if payload:
                     if (
                         client_id
@@ -93,10 +94,9 @@ class PacketWebSocket(WebSocket):
             except Exception as e:
                 logger.warning(f"WebSocket JWT auth error: {e}")
 
-        api_token = api_key or token
-        if api_token and token_manager:
+        if api_key and token_manager:
             try:
-                token_info = token_manager.verify_token(api_token)
+                token_info = token_manager.verify_token(api_key)
                 if token_info:
                     self.user = f"api_token:{token_info.get('name', 'unknown')}"
                     _connected_clients.add(self)

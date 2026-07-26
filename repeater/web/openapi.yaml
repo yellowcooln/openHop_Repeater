@@ -2182,12 +2182,12 @@ paths:
           required: false
           schema:
             type: integer
-        - name: token
+        - name: ticket
           in: query
           required: false
           schema:
             type: string
-          description: JWT token for EventSource clients that cannot send Authorization headers.
+          description: Short-lived one-time stream ticket for EventSource clients.
       responses:
         '200':
           description: SSE event stream

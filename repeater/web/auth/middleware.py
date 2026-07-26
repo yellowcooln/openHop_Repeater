@@ -44,21 +44,15 @@ def require_auth(func):
         if request_params is None:
             request_params = {}
 
-        query_token = request_params.get("token")
-        if query_token:
-            payload = jwt_handler.verify_jwt(query_token)
-
-            if payload:
-                cherrypy.request.user = {
-                    "username": payload["sub"],
-                    "client_id": payload["client_id"],
-                    "auth_type": "jwt_query",
-                }
-                if hasattr(cherrypy.request, "params") and "token" in cherrypy.request.params:
-                    del cherrypy.request.params["token"]
+        query_ticket = request_params.get("ticket")
+        ticket_manager = cherrypy.config.get("stream_ticket_manager")
+        if query_ticket and ticket_manager:
+            identity = ticket_manager.consume(query_ticket, cherrypy.request.path_info)
+            if identity:
+                cherrypy.request.user = {**identity, "auth_type": "stream_ticket"}
+                if hasattr(cherrypy.request, "params"):
+                    cherrypy.request.params.pop("ticket", None)
                 return func(*args, **kwargs)
-            else:
-                logger.warning("Invalid or expired JWT query token")
 
         # Try API token authentication
         api_key = cherrypy.request.headers.get("X-API-Key", "")

@@ -36,8 +36,9 @@ class CompanionFrameWebSocket(WebSocket):
 
         params = parse_qs(qs)
         ticket = params.get("ticket", [None])[0]
-        token = params.get("token", [None])[0]
         companion_name = params.get("companion_name", [None])[0]
+        auth_header = self.environ.get("HTTP_AUTHORIZATION", "") if hasattr(self, "environ") else ""
+        bearer_token = auth_header[7:] if auth_header.startswith("Bearer ") else ""
 
         if not jwt_handler:
             logger.warning("Connection rejected: no JWT handler configured")
@@ -54,14 +55,14 @@ class CompanionFrameWebSocket(WebSocket):
                     "client_id": identity.get("client_id"),
                 }
 
-        if not token and payload is None:
+        if not bearer_token and payload is None:
             logger.warning("Connection rejected: missing token")
             self.close(code=1008, reason="unauthorized")
             return
 
         if payload is None:
             try:
-                payload = jwt_handler.verify_jwt(token)
+                payload = jwt_handler.verify_jwt(bearer_token)
                 if not payload:
                     logger.warning("Connection rejected: invalid token")
                     self.close(code=1008, reason="unauthorized")

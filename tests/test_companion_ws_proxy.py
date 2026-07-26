@@ -15,8 +15,18 @@ def cp_cfg(monkeypatch):
 
 
 def _ws(query_string):
+    parts = [part for part in query_string.split("&") if part]
+    bearer = None
+    retained = []
+    for part in parts:
+        if part.startswith("token="):
+            bearer = part.split("=", 1)[1]
+        else:
+            retained.append(part)
     ws = object.__new__(proxy.CompanionFrameWebSocket)
-    ws.environ = {"QUERY_STRING": query_string}
+    ws.environ = {"QUERY_STRING": "&".join(retained)}
+    if bearer:
+        ws.environ["HTTP_AUTHORIZATION"] = f"Bearer {bearer}"
     ws.close = MagicMock()
     ws.send = MagicMock()
     ws._teardown = MagicMock()
@@ -40,6 +50,18 @@ def test_opened_rejects_invalid_token(cp_cfg):
     cp_cfg["jwt_handler"] = SimpleNamespace(verify_jwt=lambda _t: None)
     ws = _ws("token=t&companion_name=c1")
     ws.opened()
+    ws.close.assert_called_once_with(code=1008, reason="unauthorized")
+
+
+def test_opened_rejects_reusable_query_jwt(cp_cfg):
+    cp_cfg["jwt_handler"] = SimpleNamespace(
+        verify_jwt=lambda _token: pytest.fail("query JWT must not be verified")
+    )
+    ws = _ws("companion_name=c1")
+    ws.environ["QUERY_STRING"] = "token=valid-but-leaky&companion_name=c1"
+
+    ws.opened()
+
     ws.close.assert_called_once_with(code=1008, reason="unauthorized")
 
 

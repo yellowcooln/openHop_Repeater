@@ -9,8 +9,8 @@ def check_auth():
     """
     CherryPy tool to check authentication before processing request.
 
-    Checks for either JWT in Authorization header, API token in X-API-Key header,
-    or JWT token in query parameter (for EventSource/SSE connections).
+    Checks for a JWT in Authorization, an API token in X-API-Key, or a one-time
+    endpoint-bound stream ticket in the query string.
     Sets cherrypy.request.user on success.
     Returns 401 JSON response on failure.
     """
@@ -55,21 +55,6 @@ def check_auth():
         if identity:
             cherrypy.request.user = {**identity, "auth_type": "stream_ticket"}
             del cherrypy.request.params["ticket"]
-            return
-
-    # Legacy query JWT support remains during the frontend migration.
-    query_token = cherrypy.request.params.get("token")
-    if query_token:
-        payload = jwt_handler.verify_jwt(query_token)
-
-        if payload:
-            cherrypy.request.user = {
-                "username": payload.get("sub"),
-                "client_id": payload.get("client_id"),
-                "auth_type": "jwt_query",
-            }
-            # Remove token from params to avoid exposing it in logs
-            del cherrypy.request.params["token"]
             return
 
     # Check for API token in X-API-Key header

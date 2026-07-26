@@ -193,18 +193,21 @@ def test_optional_auth_rejects_invalid_supplied_credentials(monkeypatch):
     assert exc_info.value.status == 401
 
 
-def test_check_auth_accepts_query_token_and_removes_it(monkeypatch):
-    jwt_handler = SimpleNamespace(verify_jwt=lambda _t: {"sub": "admin", "client_id": "c2"})
-    token_manager = SimpleNamespace(verify_token=lambda _k: None)
-    req, _resp = _set_cp(
+def test_check_auth_rejects_reusable_query_jwt(monkeypatch):
+    jwt_handler = SimpleNamespace(
+        verify_jwt=lambda _token: pytest.fail("query JWT must not be verified")
+    )
+    token_manager = SimpleNamespace(verify_token=lambda _key: None)
+    _set_cp(
         monkeypatch,
-        params={"token": "xyz", "x": "1"},
+        params={"token": "valid-but-leaky"},
         cfg={"jwt_handler": jwt_handler, "token_manager": token_manager},
     )
 
-    assert check_auth() is None
-    assert req.user["auth_type"] == "jwt_query"
-    assert "token" not in req.params
+    with pytest.raises(cherrypy.HTTPError) as exc_info:
+        check_auth()
+
+    assert exc_info.value.status == 401
 
 
 def test_check_auth_accepts_api_key(monkeypatch):

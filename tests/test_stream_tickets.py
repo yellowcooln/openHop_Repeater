@@ -1,6 +1,7 @@
 import hashlib
 import io
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import cherrypy
 import pytest
@@ -145,6 +146,38 @@ def test_packet_websocket_consumes_ticket_once(monkeypatch):
         assert manager.consume(ticket, "/ws/packets") is None
     finally:
         websocket_handler._connected_clients.discard(ws)
+
+
+def test_packet_websocket_rejects_query_jwt_but_accepts_api_key_header(monkeypatch):
+    jwt_handler = SimpleNamespace(
+        verify_jwt=lambda _token: pytest.fail("query JWT must not be verified")
+    )
+    token_manager = SimpleNamespace(
+        verify_token=lambda token: (
+            {"id": 7, "name": "Home Assistant"} if token == "ha-key" else None
+        )
+    )
+    monkeypatch.setattr(
+        cherrypy,
+        "config",
+        {"jwt_handler": jwt_handler, "token_manager": token_manager},
+        raising=False,
+    )
+
+    rejected = object.__new__(websocket_handler.PacketWebSocket)
+    rejected.environ = {"QUERY_STRING": "token=valid-but-leaky"}
+    rejected.close = MagicMock()
+    rejected.opened()
+    rejected.close.assert_called_once_with(code=1008, reason="unauthorized")
+
+    accepted = object.__new__(websocket_handler.PacketWebSocket)
+    accepted.environ = {"QUERY_STRING": "", "HTTP_X_API_KEY": "ha-key"}
+    accepted.close = MagicMock()
+    accepted.opened()
+    try:
+        assert accepted.user == "api_token:Home Assistant"
+    finally:
+        websocket_handler._connected_clients.discard(accepted)
 
 
 def test_companion_websocket_accepts_ticket_before_route_validation(monkeypatch):
