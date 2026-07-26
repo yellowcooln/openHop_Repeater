@@ -80,7 +80,32 @@ def check_auth():
     raise cherrypy.HTTPError(401, "Unauthorized - Valid JWT or API token required")
 
 
+def check_optional_auth():
+    """Populate request.user when credentials are supplied, but allow anonymous requests.
+
+    First-run endpoints such as config import need to accept anonymous requests while
+    setup is incomplete.  They still need valid supplied credentials to be processed
+    so authenticated administrators are not mistaken for anonymous callers after setup.
+    """
+    if cherrypy.request.method == "OPTIONS":
+        return
+
+    params = getattr(cherrypy.request, "params", {}) or {}
+    credentials_supplied = bool(
+        cherrypy.request.headers.get("Authorization")
+        or cherrypy.request.headers.get("X-API-Key")
+        or params.get("token")
+    )
+    if not credentials_supplied:
+        return
+
+    check_auth()
+
+
 def register_require_auth_tool():
     if not hasattr(cherrypy.tools, "require_auth"):
         cherrypy.tools.require_auth = cherrypy.Tool("before_handler", check_auth)
         logger.info("CherryPy require_auth tool registered")
+    if not hasattr(cherrypy.tools, "optional_auth"):
+        cherrypy.tools.optional_auth = cherrypy.Tool("before_handler", check_optional_auth)
+        logger.info("CherryPy optional_auth tool registered")

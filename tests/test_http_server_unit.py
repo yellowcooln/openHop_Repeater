@@ -354,3 +354,44 @@ def test_http_server_passes_oidc_factory_to_auth_endpoints(monkeypatch, tmp_path
     hs.HTTPStatsServer(config={}, config_path=str(Path(tmp_path) / "cfg.yml"))
 
     assert "oidc_client_factory" in captured["kwargs"]
+
+
+def test_config_import_route_runs_optional_authentication(monkeypatch):
+    mounts = []
+    server = object.__new__(hs.HTTPStatsServer)
+    server.host = "127.0.0.1"
+    server.port = 0
+    server.config = {}
+    server.daemon_instance = None
+    server._cors_enabled = False
+    server.jwt_handler = object()
+    server.token_manager = object()
+    server.app = SimpleNamespace(apply_web_config=lambda: None)
+    server.auth_app = object()
+    server.doc_app = object()
+
+    monkeypatch.setattr(hs, "_install_cheroot_bad_fd_unraisable_filter", lambda: None)
+    monkeypatch.setattr(hs, "register_require_auth_tool", lambda: None)
+    monkeypatch.setattr(hs, "WEBSOCKET_AVAILABLE", False)
+    monkeypatch.setattr(cherrypy, "config", SimpleNamespace(update=lambda _values: None))
+    monkeypatch.setattr(
+        cherrypy,
+        "tree",
+        SimpleNamespace(mount=lambda app, path, config: mounts.append((app, path, config))),
+    )
+    monkeypatch.setattr(cherrypy, "engine", SimpleNamespace(start=lambda: None))
+    monkeypatch.setattr(
+        cherrypy,
+        "log",
+        SimpleNamespace(
+            access_log=SimpleNamespace(propagate=True),
+            error_log=SimpleNamespace(setLevel=lambda _level: None),
+        ),
+    )
+
+    server.start()
+
+    main_config = mounts[0][2]
+    route_config = main_config["/api/config_import"]
+    assert route_config["tools.require_auth.on"] is False
+    assert route_config["tools.optional_auth.on"] is True

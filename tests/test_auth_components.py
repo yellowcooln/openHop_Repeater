@@ -7,7 +7,7 @@ import jwt
 import pytest
 
 from repeater.web.auth.api_tokens import APITokenManager
-from repeater.web.auth.cherrypy_tool import check_auth
+from repeater.web.auth.cherrypy_tool import check_auth, check_optional_auth
 from repeater.web.auth.jwt_handler import JWTHandler
 from repeater.web.auth.middleware import require_auth
 
@@ -140,6 +140,43 @@ def test_check_auth_accepts_bearer_token(monkeypatch):
 
     assert check_auth() is None
     assert req.user["auth_type"] == "jwt"
+
+
+def test_optional_auth_allows_anonymous_first_run_request(monkeypatch):
+    req, _resp = _set_cp(monkeypatch, path="/api/config_import", cfg={})
+
+    assert check_optional_auth() is None
+    assert req.user is None
+
+
+def test_optional_auth_populates_user_for_authenticated_config_import(monkeypatch):
+    jwt_handler = SimpleNamespace(verify_jwt=lambda _t: {"sub": "admin", "client_id": "c1"})
+    token_manager = SimpleNamespace(verify_token=lambda _k: None)
+    req, _resp = _set_cp(
+        monkeypatch,
+        path="/api/config_import",
+        headers={"Authorization": "Bearer valid"},
+        cfg={"jwt_handler": jwt_handler, "token_manager": token_manager},
+    )
+
+    assert check_optional_auth() is None
+    assert req.user == {"username": "admin", "client_id": "c1", "auth_type": "jwt"}
+
+
+def test_optional_auth_rejects_invalid_supplied_credentials(monkeypatch):
+    jwt_handler = SimpleNamespace(verify_jwt=lambda _t: None)
+    token_manager = SimpleNamespace(verify_token=lambda _k: None)
+    _set_cp(
+        monkeypatch,
+        path="/api/config_import",
+        headers={"Authorization": "Bearer invalid"},
+        cfg={"jwt_handler": jwt_handler, "token_manager": token_manager},
+    )
+
+    with pytest.raises(cherrypy.HTTPError) as exc_info:
+        check_optional_auth()
+
+    assert exc_info.value.status == 401
 
 
 def test_check_auth_accepts_query_token_and_removes_it(monkeypatch):

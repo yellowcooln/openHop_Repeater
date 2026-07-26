@@ -587,6 +587,7 @@ class HTTPStatsServer:
                 },
                 "/api/config_import": {
                     "tools.require_auth.on": False,
+                    "tools.optional_auth.on": True,
                 },
             }
 
