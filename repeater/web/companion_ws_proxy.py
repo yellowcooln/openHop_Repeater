@@ -35,6 +35,7 @@ class CompanionFrameWebSocket(WebSocket):
             qs = self.environ.get("QUERY_STRING", "")
 
         params = parse_qs(qs)
+        ticket = params.get("ticket", [None])[0]
         token = params.get("token", [None])[0]
         companion_name = params.get("companion_name", [None])[0]
 
@@ -43,21 +44,32 @@ class CompanionFrameWebSocket(WebSocket):
             self.close(code=1011, reason="server configuration error")
             return
 
-        if not token:
+        payload = None
+        ticket_manager = cherrypy.config.get("stream_ticket_manager")
+        if ticket and ticket_manager:
+            identity = ticket_manager.consume(ticket, "/ws/companion_frame")
+            if identity:
+                payload = {
+                    "sub": identity.get("username"),
+                    "client_id": identity.get("client_id"),
+                }
+
+        if not token and payload is None:
             logger.warning("Connection rejected: missing token")
             self.close(code=1008, reason="unauthorized")
             return
 
-        try:
-            payload = jwt_handler.verify_jwt(token)
-            if not payload:
-                logger.warning("Connection rejected: invalid token")
+        if payload is None:
+            try:
+                payload = jwt_handler.verify_jwt(token)
+                if not payload:
+                    logger.warning("Connection rejected: invalid token")
+                    self.close(code=1008, reason="unauthorized")
+                    return
+            except Exception as e:
+                logger.warning(f"Auth error: {e}")
                 self.close(code=1008, reason="unauthorized")
                 return
-        except Exception as e:
-            logger.warning(f"Auth error: {e}")
-            self.close(code=1008, reason="unauthorized")
-            return
 
         if not companion_name:
             logger.warning("Connection rejected: missing companion_name")

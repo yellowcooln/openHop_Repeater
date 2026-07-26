@@ -295,6 +295,26 @@ class AuthEndpoints:
         return result
 
     @cherrypy.expose
+    @cherrypy.tools.json_out()
+    @require_auth
+    def stream_ticket(self):
+        """Issue a short-lived one-time credential for a browser stream."""
+        if cherrypy.request.method != "POST":
+            raise cherrypy.HTTPError(405, "Method not allowed")
+
+        manager = cherrypy.config.get("stream_ticket_manager")
+        if manager is None:
+            raise cherrypy.HTTPError(503, "Stream ticket service unavailable")
+        try:
+            body = cherrypy.request.body.read().decode("utf-8")
+            data = json.loads(body) if body else {}
+            issued = manager.issue(cherrypy.request.user, data.get("path", ""))
+        except (ValueError, TypeError, json.JSONDecodeError):
+            cherrypy.response.status = 400
+            return {"success": False, "error": "Unsupported stream path"}
+        return {"success": True, **issued}
+
+    @cherrypy.expose
     def login(self, **kwargs):
 
         cherrypy.response.headers["Content-Type"] = "application/json"

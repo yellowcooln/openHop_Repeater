@@ -46,8 +46,18 @@ def check_auth():
             }
             return
 
-    # Check for JWT token in query parameter (for EventSource/SSE)
-    # EventSource doesn't support custom headers, so we use query param
+    # Browser EventSource clients cannot set Authorization headers. Prefer a
+    # one-time endpoint-bound ticket in their URLs.
+    query_ticket = cherrypy.request.params.get("ticket")
+    ticket_manager = cherrypy.config.get("stream_ticket_manager")
+    if query_ticket and ticket_manager:
+        identity = ticket_manager.consume(query_ticket, cherrypy.request.path_info)
+        if identity:
+            cherrypy.request.user = {**identity, "auth_type": "stream_ticket"}
+            del cherrypy.request.params["ticket"]
+            return
+
+    # Legacy query JWT support remains during the frontend migration.
     query_token = cherrypy.request.params.get("token")
     if query_token:
         payload = jwt_handler.verify_jwt(query_token)
@@ -94,6 +104,7 @@ def check_optional_auth():
     credentials_supplied = bool(
         cherrypy.request.headers.get("Authorization")
         or cherrypy.request.headers.get("X-API-Key")
+        or params.get("ticket")
         or params.get("token")
     )
     if not credentials_supplied:

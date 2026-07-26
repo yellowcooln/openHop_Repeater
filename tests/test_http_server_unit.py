@@ -375,6 +375,7 @@ def test_config_import_route_runs_optional_authentication(monkeypatch):
     server._cors_enabled = False
     server.jwt_handler = object()
     server.token_manager = object()
+    server.stream_ticket_manager = object()
     server.app = SimpleNamespace(apply_web_config=lambda: None)
     server.auth_app = object()
     server.doc_app = object()

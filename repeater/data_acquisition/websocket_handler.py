@@ -38,17 +38,36 @@ class PacketWebSocket(WebSocket):
             qs = self.environ.get("QUERY_STRING", "")
 
         params = parse_qs(qs)
+        ticket = params.get("ticket", [None])[0]
         token = params.get("token", [None])[0]
         client_id = params.get("client_id", [None])[0]
 
         api_key = self.environ.get("HTTP_X_API_KEY", "") if hasattr(self, "environ") else ""
+
+        ticket_manager = cherrypy.config.get("stream_ticket_manager")
+        if ticket and ticket_manager:
+            identity = ticket_manager.consume(ticket, "/ws/packets")
+            if identity:
+                ticket_client_id = identity.get("client_id")
+                if client_id and ticket_client_id and ticket_client_id != client_id:
+                    logger.warning("WebSocket connection rejected: client_id mismatch")
+                    self.close(code=1008, reason="unauthorized")
+                    return
+                self.user = identity.get("username") or "unknown user"
+                _connected_clients.add(self)
+                logger.info(
+                    "WebSocket connected (%s). Total clients: %s",
+                    self.user,
+                    len(_connected_clients),
+                )
+                return
 
         if not jwt_handler:
             logger.warning("WebSocket connection rejected: no JWT handler configured")
             self.close(code=1011, reason="server configuration error")
             return
 
-        if not token and not api_key:
+        if not token and not api_key and not ticket:
             logger.warning("WebSocket connection rejected: missing token")
             self.close(code=1008, reason="unauthorized")
             return

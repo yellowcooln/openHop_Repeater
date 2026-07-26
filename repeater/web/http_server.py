@@ -27,6 +27,7 @@ from .auth.cherrypy_tool import register_require_auth_tool
 from .auth.jwt_handler import JWTHandler
 from .auth.oidc_client import OIDCClient
 from .auth.security_epoch import get_security_epoch
+from .auth.stream_tickets import StreamTicketManager
 from .auth_endpoints import AuthEndpoints
 
 # WebSocket support
@@ -487,6 +488,7 @@ class HTTPStatsServer:
         # Initialize SQLiteHandler and APITokenManager
         self.sqlite_handler = SQLiteHandler(Path(storage_dir))
         self.token_manager = APITokenManager(self.sqlite_handler, jwt_secret)
+        self.stream_ticket_manager = StreamTicketManager()
         logger.info(f"API token manager initialized with database at {storage_dir}/repeater.db")
 
     def _setup_server_cors(self):
@@ -666,6 +668,7 @@ class HTTPStatsServer:
                     # Add auth handlers to config so they're accessible in endpoints
                     "jwt_handler": self.jwt_handler,
                     "token_manager": self.token_manager,
+                    "stream_ticket_manager": self.stream_ticket_manager,
                     # Bound the thread pool to prevent unbounded growth.
                     # SSE streams each hold one thread; allow headroom for concurrent
                     # SSE clients plus normal API polling without growing unboundedly.
