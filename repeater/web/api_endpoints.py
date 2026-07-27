@@ -4,8 +4,8 @@ import os
 import re
 import secrets
 import time
-from copy import deepcopy
 from concurrent.futures import TimeoutError as FutureTimeoutError
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
@@ -29,7 +29,11 @@ from repeater.companion.utils import (
 from repeater.config import resolve_storage_dir
 from repeater.policy_engine import PolicyEngine
 from repeater.service_utils import get_buildroot_image_info
-from repeater.setup_state import legacy_setup_status, migrate_legacy_setup_completion, setup_status
+from repeater.setup_state import (
+    BootstrapSecretManager,
+    migrate_legacy_setup_completion,
+    setup_status,
+)
 from repeater.utils_packet import create_scoped_advert_packet
 
 from .auth.middleware import require_auth
@@ -290,6 +294,7 @@ class APIEndpoints:
         event_loop=None,
         daemon_instance=None,
         config_path=None,
+        bootstrap_secret_manager: Optional[BootstrapSecretManager] = None,
     ):
         self.stats_getter = stats_getter
         self.send_advert_func = send_advert_func
@@ -297,6 +302,7 @@ class APIEndpoints:
         self.event_loop = event_loop
         self.daemon_instance = daemon_instance
         self._config_path = config_path or "/etc/openhop_repeater/config.yaml"
+        self.bootstrap_secret_manager = bootstrap_secret_manager
         self.cad_calibration = CADCalibrationEngine(daemon_instance, event_loop)
 
         # Initialize ConfigManager for centralized config management
@@ -336,7 +342,7 @@ class APIEndpoints:
                 "GET, POST, PUT, DELETE, OPTIONS"
             )
             cherrypy.response.headers["Access-Control-Allow-Headers"] = (
-                "Content-Type, Authorization"
+                "Content-Type, Authorization, X-API-Key, X-Bootstrap-Token"
             )
 
     @cherrypy.expose
@@ -391,6 +397,30 @@ class APIEndpoints:
             cherrypy.response.status = 405  # Method Not Allowed
             cherrypy.response.headers["Allow"] = "POST"
             raise cherrypy.HTTPError(405, "Method not allowed. This endpoint requires POST.")
+
+    def _claim_bootstrap_access(self):
+        manager = self.bootstrap_secret_manager
+        if manager is None:
+            raise cherrypy.HTTPError(503, "Bootstrap authorization is unavailable")
+        headers = getattr(cherrypy.request, "headers", {}) or {}
+        claim = manager.claim(headers.get("X-Bootstrap-Token"))
+        if claim is None:
+            cherrypy.response.headers["WWW-Authenticate"] = "Bootstrap"
+            raise cherrypy.HTTPError(401, "Valid bootstrap authorization is required")
+        return claim
+
+    @staticmethod
+    def _filter_bootstrap_import(imported_config: dict) -> dict:
+        """Allow anonymous bootstrap restore of non-secret identity metadata only."""
+        repeater = imported_config.get("repeater")
+        if not isinstance(repeater, dict):
+            return {}
+        allowed = {
+            key: deepcopy(repeater[key])
+            for key in ("node_name", "latitude", "longitude")
+            if key in repeater
+        }
+        return {"repeater": allowed} if allowed else {}
 
     def _fmt_hash(self, pubkey: bytes) -> str:
         """Format a node hash as a hex string respecting the configured path_hash_mode.
@@ -1330,6 +1360,7 @@ class APIEndpoints:
             return {
                 "needs_setup": needs_setup,
                 "reasons": reasons,
+                "bootstrap_required": needs_setup,
             }
         except Exception as e:
             logger.error(f"Error checking setup status: {e}")
@@ -1468,6 +1499,9 @@ class APIEndpoints:
     @cherrypy.tools.json_in()
     def setup_wizard(self):
         """Complete initial setup wizard configuration"""
+        bootstrap_manager = self.bootstrap_secret_manager
+        bootstrap_claim = None
+        bootstrap_retired = False
         try:
             self._require_post()
             data = cherrypy.request.json
@@ -1487,6 +1521,9 @@ class APIEndpoints:
                     "success": False,
                     "error": "Setup is already complete. Use authenticated endpoints for configuration changes.",
                 }
+
+            bootstrap_claim = self._claim_bootstrap_access()
+            assert bootstrap_manager is not None
 
             # Validate required fields
             node_name = data.get("node_name", "").strip()
@@ -1699,10 +1736,24 @@ class APIEndpoints:
             # Completing setup is explicit and remains complete if the radio is
             # later disabled for maintenance or receive-only operation.
             config_yaml.setdefault("setup", {})["completed"] = True
+            BootstrapSecretManager.clear_hash(config_yaml)
 
-            # Write updated config
-            with open(self._config_path, "w") as f:
-                yaml.dump(config_yaml, f, default_flow_style=False, sort_keys=False)
+            # Persist through the private atomic writer before consuming the
+            # one-time bootstrap credential.
+            from repeater.config_manager import ConfigManager
+
+            candidate_manager = ConfigManager(
+                config_path=self._config_path,
+                config=config_yaml,
+                daemon_instance=self.daemon_instance,
+            )
+            if not candidate_manager.save_to_file():
+                return {"success": False, "error": "Failed to save setup configuration"}
+
+            self.config.clear()
+            self.config.update(config_yaml)
+            bootstrap_manager.retire(bootstrap_claim)
+            bootstrap_retired = True
             sync_jwt_handler_epoch(cherrypy.config.get("jwt_handler"), wizard_security_epoch)
 
             logger.info(
@@ -1760,6 +1811,10 @@ class APIEndpoints:
             logger.error(f"Error completing setup wizard: {e}", exc_info=True)
             cherrypy.response.status = 500
             return {"success": False, "error": "Unable to complete setup"}
+        finally:
+            if bootstrap_claim is not None and not bootstrap_retired:
+                assert bootstrap_manager is not None
+                bootstrap_manager.release(bootstrap_claim)
 
     # ============================================================================
     # SYSTEM ENDPOINTS
@@ -7806,6 +7861,8 @@ class APIEndpoints:
         self._set_cors_headers()
         if cherrypy.request.method == "OPTIONS":
             return ""
+        bootstrap_manager = self.bootstrap_secret_manager
+        bootstrap_claim = None
         try:
             self._require_post()
 
@@ -7835,11 +7892,22 @@ class APIEndpoints:
                         ),
                     }
 
+                bootstrap_claim = self._claim_bootstrap_access()
+                assert bootstrap_manager is not None
+
             data = cherrypy.request.json
             imported_config = data.get("config")
 
             if not imported_config or not isinstance(imported_config, dict):
                 return self._error("Missing or invalid 'config' object in request body")
+
+            if not request_user:
+                imported_config = self._filter_bootstrap_import(imported_config)
+                if not imported_config:
+                    return self._error(
+                        "Bootstrap restore contains no allowed fields; only repeater node_name, "
+                        "latitude, and longitude may be restored before setup"
+                    )
 
             config_before_import = deepcopy(self.config)
             original_security_epoch = get_security_epoch(self.config)
@@ -7967,10 +8035,9 @@ class APIEndpoints:
                 # Imported backups cannot choose or roll back the local JWT boundary.
                 set_security_epoch(self.config, original_security_epoch)
 
-            if not request_user:
-                restored_needs_setup, _ = legacy_setup_status(self.config)
-                if not restored_needs_setup:
-                    self.config.setdefault("setup", {})["completed"] = True
+            # Bootstrap imports deliberately never complete first-run setup. Only
+            # setup_wizard validates the full configuration and retires the local
+            # one-time credential.
 
             # Persist before invalidating the live handler or applying live updates.
             saved = self.config_manager.save_to_file()
@@ -8001,6 +8068,10 @@ class APIEndpoints:
         except Exception as e:
             logger.error(f"Config import error: {e}", exc_info=True)
             return self._error(str(e))
+        finally:
+            if bootstrap_claim is not None:
+                assert bootstrap_manager is not None
+                bootstrap_manager.release(bootstrap_claim)
 
     @cherrypy.expose
     @cherrypy.tools.json_out()

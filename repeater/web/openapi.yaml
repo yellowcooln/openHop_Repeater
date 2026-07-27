@@ -3528,6 +3528,15 @@ paths:
             application/json:
               schema:
                 type: object
+                required: [needs_setup, reasons, bootstrap_required]
+                properties:
+                  needs_setup:
+                    type: boolean
+                  reasons:
+                    type: object
+                  bootstrap_required:
+                    type: boolean
+                    description: True when first-run mutations require a locally delivered bootstrap token
 
   /site_info:
     get:
@@ -3581,6 +3590,9 @@ paths:
     post:
       tags: [System]
       summary: Submit setup wizard payload
+      description: Requires the one-time token from the local bootstrap-token file.
+      security:
+        - BootstrapAuth: []
       requestBody:
         required: true
         content:
@@ -3594,6 +3606,12 @@ paths:
             application/json:
               schema:
                 type: object
+        '401':
+          description: Missing or invalid bootstrap token
+        '403':
+          description: Setup is already complete
+        '503':
+          description: Bootstrap authorization is unavailable
 
   /check_pymc_console:
     get:
@@ -4083,6 +4101,11 @@ paths:
     post:
       tags: [System]
       summary: Import configuration
+      description: Authenticated administrators may import the full supported schema. During first run, a local bootstrap token allows only repeater node_name, latitude, and longitude.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+        - BootstrapAuth: []
       requestBody:
         required: true
         content:
@@ -4096,6 +4119,10 @@ paths:
             application/json:
               schema:
                 type: object
+        '401':
+          description: Missing or invalid authentication/bootstrap token
+        '403':
+          description: Anonymous restore attempted after setup completion
 
   /identity_export:
     get:
@@ -5501,6 +5528,11 @@ components:
       in: header
       name: X-API-Key
       description: API key authentication for machine-to-machine access
+    BootstrapAuth:
+      type: apiKey
+      in: header
+      name: X-Bootstrap-Token
+      description: One-time first-run token read locally from the private bootstrap-token file
 
 # Future security - currently open
 # security:

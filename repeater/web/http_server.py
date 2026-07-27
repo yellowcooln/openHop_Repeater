@@ -20,6 +20,7 @@ import cherrypy_cors
 from repeater.config import resolve_storage_dir
 from repeater.config_manager import ConfigManager
 from repeater.data_acquisition import SQLiteHandler
+from repeater.setup_state import BootstrapSecretManager
 
 from .api_endpoints import APIEndpoints
 from .auth.api_tokens import APITokenManager
@@ -63,7 +64,10 @@ def _cors_response_headers(
     return [
         ("Access-Control-Allow-Origin", "*"),
         ("Access-Control-Allow-Methods", methods),
-        ("Access-Control-Allow-Headers", "Authorization, Content-Type, X-API-Key"),
+        (
+            "Access-Control-Allow-Headers",
+            "Authorization, Content-Type, X-API-Key, X-Bootstrap-Token",
+        ),
     ]
 
 
@@ -266,6 +270,7 @@ class StatsApp:
         event_loop=None,
         daemon_instance=None,
         config_path=None,
+        bootstrap_secret_manager=None,
     ):
 
         self.stats_getter = stats_getter
@@ -284,7 +289,13 @@ class StatsApp:
 
         # Create nested API object for routing
         self.api = APIEndpoints(
-            stats_getter, send_advert_func, self.config, event_loop, daemon_instance, config_path
+            stats_getter,
+            send_advert_func,
+            self.config,
+            event_loop,
+            daemon_instance,
+            config_path,
+            bootstrap_secret_manager,
         )
 
         # Create doc endpoint for API documentation
@@ -410,6 +421,7 @@ class HTTPStatsServer:
         self.config = config or {}
         self.config_path = config_path
         self.daemon_instance = daemon_instance
+        self.bootstrap_secret_manager = None
 
         # Initialize authentication handlers
         self._init_auth_handlers()
@@ -423,6 +435,7 @@ class HTTPStatsServer:
             event_loop,
             daemon_instance,
             config_path,
+            self.bootstrap_secret_manager,
         )
 
         # Create auth endpoints (APIEndpoints has the config_manager)
@@ -489,6 +502,17 @@ class HTTPStatsServer:
         self.sqlite_handler = SQLiteHandler(Path(storage_dir))
         self.token_manager = APITokenManager(self.sqlite_handler, jwt_secret)
         self.stream_ticket_manager = StreamTicketManager()
+        bootstrap_config_manager = ConfigManager(
+            self.config_path or "/etc/openhop_repeater/config.yaml",
+            self.config,
+            daemon_instance=getattr(self, "daemon_instance", None),
+        )
+        self.bootstrap_secret_manager = BootstrapSecretManager(
+            config=self.config,
+            config_manager=bootstrap_config_manager,
+            storage_dir=storage_dir,
+        )
+        self.bootstrap_secret_manager.ensure()
         logger.info(f"API token manager initialized with database at {storage_dir}/repeater.db")
 
     def _setup_server_cors(self):
@@ -576,6 +600,11 @@ class HTTPStatsServer:
                 # Public setup wizard endpoints (no auth required)
                 "/api/needs_setup": {
                     "tools.require_auth.on": False,
+                    "tools.response_headers.on": True,
+                    "tools.response_headers.headers": [
+                        *_security_response_headers(),
+                        *_no_store_response_headers(),
+                    ],
                 },
                 "/api/site_info": {
                     "tools.require_auth.on": False,
@@ -591,10 +620,20 @@ class HTTPStatsServer:
                 },
                 "/api/setup_wizard": {
                     "tools.require_auth.on": False,
+                    "tools.response_headers.on": True,
+                    "tools.response_headers.headers": [
+                        *_security_response_headers(),
+                        *_no_store_response_headers(),
+                    ],
                 },
                 "/api/config_import": {
                     "tools.require_auth.on": False,
                     "tools.optional_auth.on": True,
+                    "tools.response_headers.on": True,
+                    "tools.response_headers.headers": [
+                        *_security_response_headers(),
+                        *_no_store_response_headers(),
+                    ],
                 },
             }
 

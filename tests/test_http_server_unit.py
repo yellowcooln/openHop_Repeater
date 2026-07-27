@@ -275,6 +275,7 @@ def test_cors_response_headers_allow_bearer_preflight_without_credentials():
     assert headers["Access-Control-Allow-Origin"] == "*"
     assert "OPTIONS" in headers["Access-Control-Allow-Methods"]
     assert "Authorization" in headers["Access-Control-Allow-Headers"]
+    assert "X-Bootstrap-Token" in headers["Access-Control-Allow-Headers"]
     assert "Access-Control-Allow-Credentials" not in headers
 
 
@@ -338,7 +339,14 @@ def test_generated_jwt_secret_uses_atomic_private_config_writer(monkeypatch, tmp
 
     saved = config_path.read_text(encoding="utf-8")
     assert "jwt_secret:" in saved
+    assert "bootstrap_secret_hash: sha256:" in saved
+    assert "bootstrap-token" not in saved
     assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
+    bootstrap_manager = server.bootstrap_secret_manager
+    assert bootstrap_manager is not None
+    assert bootstrap_manager.delivery_path == tmp_path / "data" / "bootstrap-token"
+    assert bootstrap_manager.delivery_path.is_file()
+    assert stat.S_IMODE(bootstrap_manager.delivery_path.stat().st_mode) == 0o600
 
 
 def test_http_server_passes_oidc_factory_to_auth_endpoints(monkeypatch, tmp_path):

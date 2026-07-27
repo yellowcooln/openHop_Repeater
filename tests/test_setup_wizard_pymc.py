@@ -14,6 +14,7 @@ import cherrypy
 import pytest
 import yaml
 
+from repeater.setup_state import BootstrapSecretManager
 from repeater.web.api_endpoints import APIEndpoints
 
 # Minimal initial config.yaml the wizard writes into.
@@ -72,6 +73,15 @@ def wizard_env(tmp_path, monkeypatch):
         },
     }
     endpoints = APIEndpoints(config=config, config_path=str(config_path))
+    bootstrap_token = "test-bootstrap-token-value"
+    bootstrap_manager = BootstrapSecretManager(
+        config=config,
+        config_manager=endpoints.config_manager,
+        storage_dir=tmp_path,
+        token_factory=lambda: bootstrap_token,
+    )
+    bootstrap_manager.ensure()
+    endpoints.bootstrap_secret_manager = bootstrap_manager
 
     # Stub the post-wizard service restart — we don't want a real systemctl call.
     fake_service_utils = types.ModuleType("repeater.service_utils")
@@ -82,6 +92,7 @@ def wizard_env(tmp_path, monkeypatch):
         # cherrypy.request is a thread-local — populate the bits the handler reads.
         cherrypy.request.method = "POST"
         cherrypy.request.json = body
+        cherrypy.request.headers = {"X-Bootstrap-Token": bootstrap_token}
 
     return tmp_path, config_path, endpoints, _set_request
 
@@ -109,6 +120,8 @@ def test_wizard_pymc_usb_defaults(wizard_env):
 
     written = _read_yaml(config_path)
     assert written["setup"]["completed"] is True
+    assert "bootstrap_secret_hash" not in written["setup"]
+    assert not endpoints.bootstrap_secret_manager.delivery_path.exists()
     assert written["repeater"]["security"]["security_epoch"] == 1
     assert written["radio_type"] == "pymc_usb"
     assert written["pymc_usb"]["port"] == "/dev/ttyACM0"

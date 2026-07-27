@@ -19,6 +19,7 @@ def _make_api(config=None):
     api.stats_getter = None
     api._config_path = "/tmp/test-config.yaml"
     api.config_manager = MagicMock()
+    api.bootstrap_secret_manager = None
     return api
 
 
@@ -83,7 +84,13 @@ class _FakeDiscoveryHelper:
 
 @pytest.fixture
 def cherrypy_ctx(monkeypatch):
-    request = SimpleNamespace(method="GET", params={}, json={})
+    request = SimpleNamespace(
+        method="GET",
+        params={},
+        json={},
+        headers={},
+        user={"username": "admin", "auth_type": "jwt"},
+    )
     response = SimpleNamespace(headers={}, status=200)
     monkeypatch.setattr(cherrypy, "request", request, raising=False)
     monkeypatch.setattr(cherrypy, "response", response, raising=False)
@@ -1158,7 +1165,7 @@ def test_config_import_invalid_identity_key_hex_is_skipped(cherrypy_ctx):
     assert "identity_key" not in api.config["repeater"]
 
 
-def test_first_run_backup_restore_marks_setup_complete(cherrypy_ctx):
+def test_authenticated_backup_restore_does_not_choose_bootstrap_completion(cherrypy_ctx):
     request, _ = cherrypy_ctx
     request.method = "POST"
     api = _make_api(
@@ -1185,7 +1192,7 @@ def test_first_run_backup_restore_marks_setup_complete(cherrypy_ctx):
     result = api.config_import()
 
     assert result["success"] is True
-    assert api.config["setup"]["completed"] is True
+    assert "setup" not in api.config
 
 
 def test_authenticated_security_import_advances_epoch(cherrypy_ctx, monkeypatch):

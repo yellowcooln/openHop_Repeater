@@ -8,6 +8,13 @@
 # the YAML manually, set it true only after the node name, admin password, and
 # radio hardware are ready. Once true, disabling the radio does not reopen the
 # public setup endpoints.
+#
+# While completed is false, startup creates a one-time local token at
+# <storage.storage_dir>/bootstrap-token (native default:
+# /var/lib/openhop_repeater/bootstrap-token) and stores only its SHA-256 digest
+# here as setup.bootstrap_secret_hash. Do not set or copy that generated field
+# manually. Read the local token with sudo, enter it in the setup UI, and keep it
+# private. Successful setup removes both the digest and token file.
 setup:
   completed: false
 
