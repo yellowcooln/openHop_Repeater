@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse, urlunparse
 
+from ..proxy import ProxyConfigError, normalize_external_url
+
 
 class AuthConfigError(ValueError):
     """Raised when web.auth configuration is invalid."""
@@ -52,6 +54,7 @@ class AuthSettings:
 
 
 def normalize_auth_settings(config: dict[str, Any] | None) -> AuthSettings:
+    canonical_external_url = _canonical_http_external_url(config)
     web = config.get("web", {}) if isinstance(config, dict) else {}
     auth = web.get("auth") if isinstance(web, dict) else None
     if auth is None:
@@ -65,18 +68,34 @@ def normalize_auth_settings(config: dict[str, Any] | None) -> AuthSettings:
 
     oidc = None
     if mode in {"local_and_oidc", "oidc"}:
-        oidc = _normalize_oidc_settings(auth.get("oidc"))
+        oidc = _normalize_oidc_settings(
+            auth.get("oidc"), canonical_external_url=canonical_external_url
+        )
     return AuthSettings(mode=mode, oidc=oidc)
 
 
-def _normalize_oidc_settings(raw: Any) -> OIDCSettings:
+def _normalize_oidc_settings(
+    raw: Any, *, canonical_external_url: str | None = None
+) -> OIDCSettings:
     if not isinstance(raw, dict):
         raise AuthConfigError("web.auth.oidc is required for OIDC auth modes")
 
     issuer = _required_string(raw, "issuer")
     client_id = _required_string(raw, "client_id")
     client_secret = _required_string(raw, "client_secret")
-    external_url = _normalize_external_url(_required_string(raw, "external_url"))
+    configured_external_url = raw.get("external_url")
+    if canonical_external_url:
+        if configured_external_url not in (None, ""):
+            oidc_external_url = _normalize_oidc_external_url(
+                _required_string(raw, "external_url")
+            )
+            if oidc_external_url != canonical_external_url:
+                raise AuthConfigError(
+                    "web.auth.oidc.external_url must match http.external_url"
+                )
+        external_url = canonical_external_url
+    else:
+        external_url = _normalize_oidc_external_url(_required_string(raw, "external_url"))
     scopes = _normalize_scopes(raw.get("scopes"))
     provider_name = str(raw.get("provider_name") or "OIDC").strip() or "OIDC"
     rules = _normalize_rules(raw.get("authorization"))
@@ -98,6 +117,31 @@ def _normalize_oidc_settings(raw: Any) -> OIDCSettings:
         discovery_ttl_seconds=int(raw.get("discovery_ttl_seconds", 300)),
         jwks_ttl_seconds=int(raw.get("jwks_ttl_seconds", 300)),
     )
+
+
+def _canonical_http_external_url(config: dict[str, Any] | None) -> str | None:
+    http = config.get("http", {}) if isinstance(config, dict) else {}
+    if not isinstance(http, dict):
+        return None
+    value = http.get("external_url")
+    if value in (None, ""):
+        return None
+    if not isinstance(value, str):
+        raise AuthConfigError("http.external_url must be a string URL")
+    try:
+        return normalize_external_url(value, name="http.external_url")
+    except ProxyConfigError as exc:
+        raise AuthConfigError(str(exc)) from exc
+
+
+def _normalize_oidc_external_url(value: str) -> str:
+    # Preserve the historical behavior of removing an accidental path while
+    # canonicalizing scheme, host casing, IPv6 brackets, and default ports.
+    origin = _normalize_external_url(value)
+    try:
+        return normalize_external_url(origin, name="web.auth.oidc.external_url")
+    except ProxyConfigError as exc:
+        raise AuthConfigError(str(exc)) from exc
 
 
 def _required_string(raw: dict[str, Any], key: str) -> str:

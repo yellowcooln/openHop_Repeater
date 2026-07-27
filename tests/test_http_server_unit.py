@@ -371,6 +371,76 @@ def test_http_server_passes_oidc_factory_to_auth_endpoints(monkeypatch, tmp_path
     hs.HTTPStatsServer(config={}, config_path=str(Path(tmp_path) / "cfg.yml"))
 
     assert "oidc_client_factory" in captured["kwargs"]
+    assert "proxy_policy" in captured["kwargs"]
+
+
+def test_proxy_hook_ignores_untrusted_forwarding_and_uses_canonical_redirect(monkeypatch):
+    server = object.__new__(hs.HTTPStatsServer)
+    server.proxy_policy = hs.TrustedProxyPolicy.from_config(
+        {
+            "http": {
+                "trusted_proxies": ["10.0.0.0/24"],
+                "external_url": "https://repeater.example.com",
+                "redirect_to_https": True,
+            }
+        }
+    )
+    request = SimpleNamespace(
+        remote=SimpleNamespace(ip="192.0.2.20"),
+        headers={
+            "Host": "attacker.example",
+            "X-Forwarded-Proto": "https",
+            "X-Forwarded-Host": "attacker.example",
+        },
+        scheme="http",
+        base="http://attacker.example",
+        app=None,
+        script_name="",
+        path_info="/doc/openapi.json",
+        query_string="format=yaml",
+    )
+    monkeypatch.setattr(cherrypy, "request", request, raising=False)
+
+    with pytest.raises(cherrypy.HTTPRedirect) as exc:
+        server._apply_proxy_policy()
+
+    assert exc.value.status == 308
+    assert exc.value.urls == [
+        "https://repeater.example.com/doc/openapi.json?format=yaml"
+    ]
+    assert request.proxy_context.client_ip == "192.0.2.20"
+
+
+def test_proxy_hook_accepts_https_only_from_trusted_peer(monkeypatch):
+    server = object.__new__(hs.HTTPStatsServer)
+    server.proxy_policy = hs.TrustedProxyPolicy.from_config(
+        {
+            "http": {
+                "trusted_proxies": ["10.0.0.0/24"],
+                "external_url": "https://repeater.example.com",
+                "redirect_to_https": True,
+            }
+        }
+    )
+    request = SimpleNamespace(
+        remote=SimpleNamespace(ip="10.0.0.2"),
+        headers={
+            "Host": "127.0.0.1:8000",
+            "X-Forwarded-For": "203.0.113.7",
+            "X-Forwarded-Proto": "https",
+            "X-Forwarded-Host": "repeater.example.com",
+        },
+        scheme="http",
+        path_info="/",
+        query_string="",
+    )
+    monkeypatch.setattr(cherrypy, "request", request, raising=False)
+
+    server._apply_proxy_policy()
+
+    assert request.proxy_context.client_ip == "203.0.113.7"
+    assert request.proxy_context.scheme == "https"
+    assert request.proxy_context.host == "repeater.example.com"
 
 
 def test_config_import_route_runs_optional_authentication(monkeypatch):
@@ -384,6 +454,7 @@ def test_config_import_route_runs_optional_authentication(monkeypatch):
     server.jwt_handler = object()
     server.token_manager = object()
     server.stream_ticket_manager = object()
+    server.proxy_policy = hs.TrustedProxyPolicy.from_config({})
     server.app = SimpleNamespace(apply_web_config=lambda: None)
     server.auth_app = object()
     server.doc_app = object()
@@ -413,3 +484,4 @@ def test_config_import_route_runs_optional_authentication(monkeypatch):
     route_config = main_config["/api/config_import"]
     assert route_config["tools.require_auth.on"] is False
     assert route_config["tools.optional_auth.on"] is True
+    assert main_config["/"]["tools.trusted_proxy.on"] is True

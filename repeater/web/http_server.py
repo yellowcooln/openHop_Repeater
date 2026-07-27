@@ -30,6 +30,7 @@ from .auth.oidc_client import OIDCClient
 from .auth.security_epoch import get_security_epoch
 from .auth.stream_tickets import StreamTicketManager
 from .auth_endpoints import AuthEndpoints
+from .proxy import TrustedProxyPolicy
 
 # WebSocket support
 try:
@@ -422,6 +423,7 @@ class HTTPStatsServer:
         self.config_path = config_path
         self.daemon_instance = daemon_instance
         self.bootstrap_secret_manager = None
+        self.proxy_policy = TrustedProxyPolicy.from_config(self.config)
 
         # Initialize authentication handlers
         self._init_auth_handlers()
@@ -445,6 +447,7 @@ class HTTPStatsServer:
             self.token_manager,
             self.app.api.config_manager,
             oidc_client_factory=OIDCClient,
+            proxy_policy=self.proxy_policy,
         )
 
         # Create documentation endpoints as separate app
@@ -529,11 +532,38 @@ class HTTPStatsServer:
         public_message = "Internal server error" if str(status).startswith("500") else message
         return json.dumps({"success": False, "error": public_message})
 
+    def _apply_proxy_policy(self) -> None:
+        """Resolve trusted proxy metadata and enforce canonical HTTPS redirects."""
+        request = cherrypy.request
+        remote = getattr(request, "remote", None)
+        remote_ip = str(remote.ip) if remote and getattr(remote, "ip", None) else "unknown"
+        headers = getattr(request, "headers", {})
+        context = self.proxy_policy.resolve_request(
+            remote_ip=remote_ip,
+            headers=headers,
+            direct_scheme=str(getattr(request, "scheme", "http") or "http"),
+            direct_host=str(headers.get("Host", "localhost") or "localhost"),
+        )
+        request.proxy_context = context
+        path_info = str(getattr(request, "path_info", "/") or "/")
+        script_name = str(getattr(request, "script_name", "") or "").rstrip("/")
+        mounted_path = f"{script_name}{path_info}"
+        redirect_url = self.proxy_policy.redirect_url(
+            context,
+            mounted_path,
+            str(getattr(request, "query_string", "") or ""),
+        )
+        if redirect_url:
+            raise cherrypy.HTTPRedirect(redirect_url, status=308)
+
     def start(self):
 
         try:
             _install_cheroot_bad_fd_unraisable_filter()
             register_require_auth_tool()
+            cherrypy.tools.trusted_proxy = cherrypy.Tool(
+                "on_start_resource", self._apply_proxy_policy, priority=5
+            )
 
             if self._cors_enabled:
                 self._setup_server_cors()
@@ -544,6 +574,7 @@ class HTTPStatsServer:
             config = {
                 "/": {
                     "tools.sessions.on": False,
+                    "tools.trusted_proxy.on": True,
                     "request.show_tracebacks": False,
                     "tools.response_headers.on": True,
                     "tools.response_headers.headers": _security_response_headers(),
@@ -731,6 +762,7 @@ class HTTPStatsServer:
             # Mount auth endpoints
             auth_config = {
                 "/": {
+                    "tools.trusted_proxy.on": True,
                     "tools.response_headers.on": True,
                     "tools.response_headers.headers": [
                         ("Content-Type", "application/json"),
@@ -751,6 +783,7 @@ class HTTPStatsServer:
             # Mount documentation endpoints as separate app (no auth required for docs)
             doc_config = {
                 "/": {
+                    "tools.trusted_proxy.on": True,
                     "tools.require_auth.on": False,  # Docs are publicly accessible
                     "tools.response_headers.on": True,
                     "tools.response_headers.headers": [

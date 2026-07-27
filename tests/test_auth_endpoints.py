@@ -14,6 +14,7 @@ from repeater.web.auth_endpoints import (
     TokensAPIEndpoint,
     _LoginThrottle,
 )
+from repeater.web.proxy import TrustedProxyPolicy
 
 
 @pytest.fixture
@@ -269,6 +270,26 @@ def test_request_ip_accepts_forwarded_header_from_trusted_peer(cp_ctx):
 
     request.headers["X-Forwarded-For"] = "not-an-ip, 192.0.2.10"
     assert auth._get_request_ip() == "192.0.2.10"
+
+
+def test_request_ip_uses_shared_cidr_policy_and_rightmost_untrusted_hop(cp_ctx):
+    policy = TrustedProxyPolicy.from_config(
+        {"http": {"trusted_proxies": ["10.0.0.0/24"]}}
+    )
+    auth = AuthEndpoints(
+        config={},
+        jwt_handler=_jwt_handler(ok=True),
+        token_manager=_token_mgr(),
+        proxy_policy=policy,
+    )
+    request, _response, _cfg = cp_ctx(
+        headers={
+            "X-Forwarded-For": "198.51.100.99, 203.0.113.7, 10.0.0.3"
+        }
+    )
+    request.remote = SimpleNamespace(ip="10.0.0.2")
+
+    assert auth._get_request_ip() == "203.0.113.7"
 
 
 @pytest.mark.asyncio

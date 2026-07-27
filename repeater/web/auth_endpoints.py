@@ -3,7 +3,6 @@
 Authentication endpoints for login and token management
 """
 
-import ipaddress
 import json
 import logging
 import math
@@ -21,6 +20,7 @@ from .auth.security_epoch import (
     sync_jwt_handler_epoch,
 )
 from .oidc_endpoints import OIDCEndpoints
+from .proxy import TrustedProxyPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -240,23 +240,14 @@ class AuthEndpoints:
         login_throttle=None,
         oidc_client_factory=None,
         oidc_start_throttle=None,
+        proxy_policy: TrustedProxyPolicy | None = None,
     ):
         self.config = config
         self.jwt_handler = jwt_handler
         self.token_manager = token_manager
         self.config_manager = config_manager
         self._login_throttle = login_throttle or _LoginThrottle()
-        http_config = config.get("http", {}) if isinstance(config, dict) else {}
-        raw_trusted_proxies = (
-            http_config.get("trusted_proxies", []) if isinstance(http_config, dict) else []
-        )
-        self._trusted_proxies = set()
-        if isinstance(raw_trusted_proxies, list):
-            for value in raw_trusted_proxies:
-                try:
-                    self._trusted_proxies.add(str(ipaddress.ip_address(str(value).strip())))
-                except ValueError:
-                    logger.warning("Ignoring invalid http.trusted_proxies entry")
+        self.proxy_policy = proxy_policy or TrustedProxyPolicy.from_config(config)
         self.auth_settings = normalize_auth_settings(config)
         self.oidc = OIDCEndpoints(
             self.auth_settings,
@@ -268,17 +259,20 @@ class AuthEndpoints:
 
     def _get_request_ip(self) -> str:
         """Extract client IP only from explicitly trusted reverse proxies."""
+        existing = getattr(cherrypy.request, "proxy_context", None)
+        if existing is not None:
+            return existing.client_ip
         remote = getattr(cherrypy.request, "remote", None)
         remote_ip = str(remote.ip) if remote and getattr(remote, "ip", None) else "unknown"
-        xff = cherrypy.request.headers.get("X-Forwarded-For", "")
-        if xff and remote_ip in self._trusted_proxies:
-            first = xff.split(",", 1)[0].strip()
-            if first:
-                try:
-                    return str(ipaddress.ip_address(first))
-                except ValueError:
-                    logger.warning("Ignoring invalid X-Forwarded-For client address")
-        return remote_ip
+        headers = getattr(cherrypy.request, "headers", {})
+        scheme = str(getattr(cherrypy.request, "scheme", "http") or "http")
+        host = str(headers.get("Host", "localhost") or "localhost")
+        return self.proxy_policy.resolve_request(
+            remote_ip=remote_ip,
+            headers=headers,
+            direct_scheme=scheme,
+            direct_host=host,
+        ).client_ip
 
     @cherrypy.expose
     @cherrypy.tools.json_out()

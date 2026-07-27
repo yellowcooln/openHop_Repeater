@@ -707,12 +707,24 @@ http:
   host: "0.0.0.0"
   port: 8000
 
-  # Immediate reverse proxies that may supply X-Forwarded-For for login and
-  # OIDC rate limiting. Exact IP addresses only. Forwarding headers from every
-  # other peer are ignored. Leave empty for direct/LAN-only access.
+  # Immediate reverse proxies that may supply X-Forwarded-For,
+  # X-Forwarded-Proto, and X-Forwarded-Host. Entries may be exact IP addresses
+  # or CIDR network addresses (CIDRs with host bits are rejected). The client
+  # chain is evaluated right-to-left; headers from every other peer are ignored.
+  # Leave empty for direct/LAN-only access.
   trusted_proxies: []
   # trusted_proxies:
-  #   - "192.168.1.10"
+  #   - "127.0.0.1"       # proxy on this host
+  #   - "192.168.1.0/24"  # dedicated proxy network
+
+  # Optional canonical public origin. Use an HTTPS origin without a path.
+  # OIDC inherits this value; if web.auth.oidc.external_url is also set, both
+  # values must match. HTTP is accepted only for loopback development origins.
+  # external_url: "https://repeater.example.com"
+
+  # Opt-in canonical HTTP-to-HTTPS redirects. This requires an HTTPS
+  # external_url and never constructs Location from a request Host header.
+  redirect_to_https: false
 
   # CherryPy worker/thread tuning.
   # thread_pool is the initial worker count (minimum enforced by server: 2).
@@ -742,6 +754,7 @@ web:
     #   client_id: "openhop"
     #   client_secret: "replace-with-client-secret"
     #   provider_name: "Authentik"
+    #   # Required unless http.external_url is set; if both are set they must match.
     #   external_url: "https://repeater.example.com"
     #   scopes:
     #     - openid

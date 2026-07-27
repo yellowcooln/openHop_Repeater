@@ -31,6 +31,9 @@ OAuth2 scope mapping that emits the required claim.
 Start in mixed mode so local password recovery remains available while testing:
 
 ```yaml
+http:
+  external_url: "https://repeater.example.com"
+
 web:
   auth:
     mode: local_and_oidc
@@ -39,7 +42,6 @@ web:
       client_id: "openhop"
       client_secret: "replace-with-client-secret"
       provider_name: "Authentik"
-      external_url: "https://repeater.example.com"
       scopes:
         - openid
         - profile
@@ -84,24 +86,52 @@ Edits** section for the general procedure.
 
 ## Reverse Proxy
 
-The externally visible URL must be HTTPS and must match `external_url`. openHop
-builds its callback URL and all browser callback completion/error redirects from
-this configured value, not from `Host` or forwarded scheme headers. Preserve
-HTTPS at the public edge and do not expose the backend as an alternate route
-that bypasses the identity provider.
+The externally visible URL must be HTTPS and must match `http.external_url`.
+openHop builds its callback URL and all browser callback completion/error
+redirects from this configured value, not from `Host` or forwarded headers.
+The legacy `web.auth.oidc.external_url` setting remains supported; if both are
+set, they must resolve to the same origin. Preserve HTTPS at the public edge and
+do not expose the backend as an alternate route that bypasses the identity
+provider.
 
-Configure only the immediate reverse proxy as trusted for client-IP throttling:
+Configure only actual reverse proxies as trusted for client-IP throttling and
+forwarded origin metadata:
 
 ```yaml
 http:
+  host: "127.0.0.1"
+  external_url: "https://repeater.example.com"
+  redirect_to_https: false
   trusted_proxies:
-    - "192.168.1.10"
+    - "127.0.0.1"
 ```
 
-Exact IP addresses are supported. Forwarding headers from every other peer are
-ignored. The proxy must overwrite, rather than append to, client-supplied
-`X-Forwarded-For`. When the proxy runs on the repeater, bind `http.host` to
-`127.0.0.1`; when it runs elsewhere, firewall port 8000 to that proxy only.
+Exact IP addresses and CIDR network addresses are supported; CIDRs containing
+host bits are rejected instead of being silently broadened. Add only addresses
+that are actually reverse proxies; forwarding headers from every other peer are
+ignored. openHop evaluates `X-Forwarded-For` right-to-left and accepts
+`X-Forwarded-Proto` and `X-Forwarded-Host` only from the immediate trusted
+peer. The proxy should still strip unexpected client forwarding headers and set
+or append its own values.
+
+When the proxy runs on the repeater, bind `http.host` to `127.0.0.1`. When it
+runs elsewhere, bind a reachable address and firewall port 8000 to the proxy
+network only. Set `redirect_to_https: true` only when every legitimate request
+should use the canonical HTTPS origin; direct HTTP health checks will then
+receive a `308` redirect.
+
+For a proxy on another LAN host, the equivalent `/etc/openhop_repeater/config.yaml`
+section is:
+
+```yaml
+http:
+  host: "0.0.0.0"
+  port: 8000
+  external_url: "https://repeater.example.com"
+  trusted_proxies:
+    - "192.168.1.10"
+  redirect_to_https: true
+```
 
 ## CLI And API Tokens
 
