@@ -3602,6 +3602,139 @@ class APIEndpoints:
             logger.error(f"Error validating configuration: {e}", exc_info=True)
             return self._error(str(e))
 
+
+    @cherrypy.expose
+    @cherrypy.tools.json_out()
+    def sensors_config(self):
+        """Return the current sensors section from config.
+
+        GET /api/sensors/config
+
+        Returns: {"success": true, "data": {"enabled": bool, "poll_interval_seconds": float, "auto_install_packages": bool, "definitions": [...]}}
+        """
+        self._set_cors_headers()
+
+        if cherrypy.request.method != "GET":
+            cherrypy.response.status = 405
+            cherrypy.response.headers["Allow"] = "GET"
+            raise cherrypy.HTTPError(405, "Method not allowed. This endpoint requires GET.")
+
+        try:
+            sensors_section = self.config.get("sensors", {})
+            if not isinstance(sensors_section, dict):
+                sensors_section = {}
+
+            return self._success({
+                "enabled": bool(sensors_section.get("enabled", False)),
+                "poll_interval_seconds": sensors_section.get("poll_interval_seconds", 30.0),
+                "auto_install_packages": bool(sensors_section.get("auto_install_packages", False)),
+                "definitions": sensors_section.get("definitions", []),
+            })
+        except Exception as e:
+            logger.error(f"Error fetching sensors config: {e}", exc_info=True)
+            return self._error(str(e))
+
+    @cherrypy.expose
+    @cherrypy.tools.json_out()
+    def update_sensors_config(self):
+        """Update the sensors section in config and save to YAML.
+
+        POST /api/sensors/config
+        Body: {
+            "enabled": bool,
+            "poll_interval_seconds": float,
+            "auto_install_packages": bool,
+            "definitions": [...]  # array of sensor definition dicts
+        }
+
+        Returns: {"success": true, "restart_required": true}
+        """
+        self._set_cors_headers()
+
+        if cherrypy.request.method != "POST":
+            cherrypy.response.status = 405
+            cherrypy.response.headers["Allow"] = "POST"
+            raise cherrypy.HTTPError(405, "Method not allowed. This endpoint requires POST.")
+
+        try:
+            data = cherrypy.request.json or {}
+
+            # Validate required fields
+            if "definitions" not in data:
+                return self._error("Missing 'definitions' field")
+
+            definitions = data["definitions"]
+            if not isinstance(definitions, list):
+                return self._error("'definitions' must be an array")
+
+            # Validate each definition has required fields
+            for i, definition in enumerate(definitions):
+                if not isinstance(definition, dict):
+                    return self._error(f"Definition at index {i} must be an object")
+                if "type" not in definition or not definition["type"]:
+                    return self._error(f"Definition at index {i} is missing required 'type' field")
+                if "name" not in definition or not definition["name"]:
+                    return self._error(f"Definition at index {i} is missing required 'name' field")
+
+            # Build the sensors section
+            sensors_section = {
+                "enabled": bool(data.get("enabled", False)),
+                "poll_interval_seconds": float(data.get("poll_interval_seconds", 30.0)),
+                "auto_install_packages": bool(data.get("auto_install_packages", False)),
+                "definitions": definitions,
+            }
+
+            # Save to config file
+            self.config["sensors"] = sensors_section
+            saved = self.config_manager.save_to_file()
+
+            if not saved:
+                return self._error("Failed to save sensors configuration")
+
+            logger.info("Sensors configuration updated and saved")
+
+            return self._success({
+                "restart_required": True,
+                "message": "Sensors configuration saved. Restart the service to apply changes.",
+            })
+        except cherrypy.HTTPError:
+            raise
+        except Exception as e:
+            logger.error(f"Error updating sensors config: {e}", exc_info=True)
+            return self._error(str(e))
+
+    @cherrypy.expose
+    @cherrypy.tools.json_out()
+    def sensors_restart(self):
+        """Restart the repeater service after sensors config change.
+
+        POST /api/sensors/restart
+
+        Returns: {"success": true, "message": "..."}
+        """
+        self._set_cors_headers()
+
+        if cherrypy.request.method != "POST":
+            cherrypy.response.status = 405
+            cherrypy.response.headers["Allow"] = "POST"
+            raise cherrypy.HTTPError(405, "Method not allowed. This endpoint requires POST.")
+
+        try:
+            from repeater.service_utils import restart_service as do_restart
+
+            logger.warning("Service restart requested after sensors config change")
+            success, message = do_restart()
+
+            if success:
+                return self._success({"message": message})
+            else:
+                return self._error(message)
+        except cherrypy.HTTPError:
+            raise
+        except Exception as e:
+            logger.error(f"Error in sensors_restart: {e}", exc_info=True)
+            return self._error(str(e))
+
     @cherrypy.expose
     @cherrypy.tools.json_out()
     def logs(self):
