@@ -12,6 +12,8 @@ from .registry import SensorRegistry
 class HardwareStatsSensor(SensorBase):
     sensor_type = "hardware_stats"
 
+    _settings_schema = []
+
     def __init__(self, name: str, config: Dict[str, Any] | None = None, log=None):
         super().__init__(name=name, config=config, log=log)
         self.collector = HardwareStatsCollector()

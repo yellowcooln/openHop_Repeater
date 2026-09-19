@@ -33,6 +33,12 @@ _REG_H_VAL = 0x33
 class ENS210Sensor(SensorBase):
     sensor_type = "ens210"
 
+    _settings_schema = [
+        {"key": "i2c_address", "type": "string", "label": "I2C Address", "default": "0x43", "help": "Hex I2C address (e.g. 0x43)"},
+        {"key": "bus_number", "type": "integer", "label": "I2C Bus Number", "default": 0, "help": "Linux I2C bus number"},
+        {"key": "read_timeout_seconds", "type": "number", "label": "Read Timeout (s)", "default": 1.0, "help": "Max time to wait for measurement"},
+    ]
+
     def __init__(self, name: str, config: Optional[Dict[str, Any]] = None, log=None):
         super().__init__(name=name, config=config, log=log)
 

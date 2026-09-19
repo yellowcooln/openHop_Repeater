@@ -1,0 +1,9 @@
+# OpenAPI contract allowlist
+# Endpoints here are exempt from the "code → OpenAPI" check.
+# Used when the checker can't infer the mapping (e.g. underscore→slash).
+
+exact_paths:
+  - /sensors_types
+  - /sensors_config
+  - /sensors_config_update
+  - /sensors_read

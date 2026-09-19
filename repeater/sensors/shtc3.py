@@ -34,6 +34,11 @@ _CMD_SLEEP = [0xB0, 0x98]
 class SHTC3Sensor(SensorBase):
     sensor_type = "shtc3"
 
+    _settings_schema = [
+        {"key": "i2c_address", "type": "string", "label": "I2C Address", "default": "0x70", "help": "Hex I2C address (e.g. 0x70)"},
+        {"key": "bus_number", "type": "integer", "label": "I2C Bus Number", "default": 0, "help": "Linux I2C bus number"},
+    ]
+
     def __init__(self, name: str, config: Optional[Dict[str, Any]] = None, log=None):
         super().__init__(name=name, config=config, log=log)
 

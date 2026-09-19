@@ -67,6 +67,13 @@ def _pack_voltage_to_percent(v: float) -> int:
 class LafvinUps3sSensor(SensorBase):
     sensor_type = "lafvin_ups_3s"
 
+    _settings_schema = [
+        {"key": "i2c_address", "type": "string", "label": "I2C Address", "default": "0x41", "help": "Hex I2C address (e.g. 0x41)"},
+        {"key": "bus_number", "type": "integer", "label": "I2C Bus Number", "default": 0, "help": "Linux I2C bus number"},
+        {"key": "shunt_ohms", "type": "number", "label": "Shunt Resistor (Ω)", "default": 0.1, "help": "Shunt resistor value in ohms"},
+        {"key": "max_amps", "type": "number", "label": "Max Amps", "default": 5.0, "help": "Maximum expected current in amps"},
+    ]
+
     def __init__(self, name: str, config: Optional[Dict[str, Any]] = None, log=None):
         super().__init__(name=name, config=config, log=log)
 

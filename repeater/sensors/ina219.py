@@ -38,6 +38,13 @@ _CONFIG_32V_320MV_CONTINUOUS = 0x399F
 class INA219Sensor(SensorBase):
     sensor_type = "ina219"
 
+    _settings_schema = [
+        {"key": "i2c_address", "type": "string", "label": "I2C Address", "default": "0x40", "help": "Hex I2C address (e.g. 0x40, 0x41, 0x44, 0x45)"},
+        {"key": "bus_number", "type": "integer", "label": "I2C Bus Number", "default": 0, "help": "Linux I2C bus number"},
+        {"key": "max_expected_amps", "type": "number", "label": "Max Expected Amps", "default": 2.0, "help": "Maximum expected current for calibration"},
+        {"key": "shunt_ohms", "type": "number", "label": "Shunt Resistor (Ω)", "default": 0.1, "help": "Shunt resistor value in ohms"},
+    ]
+
     def __init__(self, name: str, config: Optional[Dict[str, Any]] = None, log=None):
         super().__init__(name=name, config=config, log=log)
 

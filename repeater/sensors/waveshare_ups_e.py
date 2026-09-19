@@ -45,6 +45,12 @@ def _u16le(data: list, offset: int) -> int:
 class WaveshareUpsESensor(SensorBase):
     sensor_type = "waveshare_ups_e"
 
+    _settings_schema = [
+        {"key": "i2c_address", "type": "string", "label": "I2C Address", "default": "0x2D", "help": "Hex I2C address (e.g. 0x2D)"},
+        {"key": "bus_number", "type": "integer", "label": "I2C Bus Number", "default": 0, "help": "Linux I2C bus number"},
+        {"key": "low_cell_mv", "type": "integer", "label": "Low Cell Threshold (mV)", "default": 3150, "help": "Per-cell voltage warning threshold in mV"},
+    ]
+
     def __init__(self, name: str, config: Optional[Dict[str, Any]] = None, log=None):
         super().__init__(name=name, config=config, log=log)
 

@@ -8716,6 +8716,203 @@ class APIEndpoints:
             logger.error(f"DB vacuum error: {e}", exc_info=True)
             return self._error(str(e))
 
+    # ============================================================================
+    # SENSOR MANAGER ENDPOINTS
+    # ============================================================================
+
+    @cherrypy.expose
+    @cherrypy.tools.json_out()
+    def sensors_types(self):
+        """Return list of available sensor types with their settings schemas."""
+        try:
+            from repeater.sensors import SensorRegistry
+            from repeater.sensors import bme280 as _bme280  # noqa: F401
+            from repeater.sensors import ens210 as _ens210  # noqa: F401
+            from repeater.sensors import hardware_stats as _hw  # noqa: F401
+            from repeater.sensors import ina219 as _ina219  # noqa: F401
+            from repeater.sensors import lafvin_ups_3s as _lafvin  # noqa: F401
+            from repeater.sensors import openhop_modem as _modem  # noqa: F401
+            from repeater.sensors import pymc_modem as _pymc  # noqa: F401
+            from repeater.sensors import shtc3 as _shtc3  # noqa: F401
+            from repeater.sensors import waveshare_ups_d as _upsd  # noqa: F401
+            from repeater.sensors import waveshare_ups_e as _upse  # noqa: F401
+
+            type_descriptions = {
+                "bme280": "Temperature, humidity, and barometric pressure",
+                "ens210": "Relative humidity and temperature",
+                "hardware_stats": "CPU, memory, disk, and system metrics",
+                "ina219": "Current, voltage, and power monitor",
+                "lafvin_ups_3s": "3S Li-ion/LiPo battery monitor (via INA219)",
+                "openhop_modem": "openHop Modem diagnostics",
+                "shtc3": "Temperature and humidity",
+                "waveshare_ups_d": "Single-cell battery monitor (via INA219)",
+                "waveshare_ups_e": "Multi-cell battery monitor (BMS MCU)",
+            }
+
+            types = []
+            for sensor_type in SensorRegistry.available_types():
+                entry = {"type": sensor_type}
+                if sensor_type in type_descriptions:
+                    entry["name"] = sensor_type.replace("_", " ").title()
+                    entry["description"] = type_descriptions[sensor_type]
+                else:
+                    entry["name"] = sensor_type
+                    entry["description"] = ""
+
+                # Collect _settings_schema from all registered factories
+                factory = SensorRegistry._factories.get(sensor_type)
+                schema = []
+                if factory is not None:
+                    if hasattr(factory, "_settings_schema"):
+                        schema = list(factory._settings_schema)
+                    elif isinstance(factory, type) and hasattr(factory, "_settings_schema"):
+                        schema = list(factory._settings_schema)
+                entry["settings"] = schema
+                types.append(entry)
+
+            return self._success({"types": types})
+        except Exception as e:
+            logger.error(f"Error listing sensor types: {e}", exc_info=True)
+            return self._error(str(e))
+
+    @cherrypy.expose
+    @cherrypy.tools.json_out()
+    def sensors_config(self):
+        """Return current sensor configuration from config.yaml."""
+        try:
+            section = self.config.get("sensors", {})
+            if not isinstance(section, dict):
+                section = {}
+
+            definitions = section.get("definitions", [])
+            if not isinstance(definitions, list):
+                definitions = []
+
+            return self._success({
+                "enabled": bool(section.get("enabled", False)),
+                "poll_interval_seconds": float(section.get("poll_interval_seconds", 30.0)),
+                "auto_install_packages": bool(section.get("auto_install_packages", False)),
+                "definitions": definitions,
+            })
+        except Exception as e:
+            logger.error(f"Error reading sensor config: {e}", exc_info=True)
+            return self._error(str(e))
+
+    @cherrypy.expose
+    @cherrypy.tools.json_out()
+    @cherrypy.tools.json_in()
+    def sensors_config_update(self):
+        """Update sensor configuration and persist to config.yaml.
+
+        POST /api/sensors/config
+        Body: {
+            "enabled": true,
+            "poll_interval_seconds": 30.0,
+            "auto_install_packages": false,
+            "definitions": [
+                {"name": "living-room-temp", "type": "bme280", "enabled": true, "auto_install_packages": false, "settings": {"i2c_address": "0x76", "bus_number": 0}}
+            ]
+        }
+        """
+        with self._provisioning_lock:
+            return self._sensors_config_update_locked()
+
+    def _sensors_config_update_locked(self):
+        try:
+            self._require_post()
+            body = cherrypy.request.json or {}
+            if not isinstance(body, dict):
+                return self._error("Invalid payload: expected JSON object")
+
+            # Read current config
+            try:
+                with open(self._config_path, "r", encoding="utf-8") as f:
+                    config_yaml = yaml.safe_load(f) or {}
+            except Exception:
+                config_yaml = self.config or {}
+
+            if not isinstance(config_yaml, dict):
+                config_yaml = {}
+
+            # Build updated sensors section
+            sensors_section = {
+                "enabled": bool(body.get("enabled", False)),
+                "poll_interval_seconds": float(body.get("poll_interval_seconds", 30.0)),
+                "auto_install_packages": bool(body.get("auto_install_packages", False)),
+            }
+
+            definitions = body.get("definitions", [])
+            if not isinstance(definitions, list):
+                return self._error("definitions must be an array")
+
+            # Validate each definition
+            for i, defn in enumerate(definitions):
+                if not isinstance(defn, dict):
+                    return self._error(f"definitions[{i}] must be an object")
+                if "type" not in defn:
+                    return self._error(f"definitions[{i}] missing required 'type' field")
+                if "name" not in defn:
+                    return self._error(f"definitions[{i}] missing required 'name' field")
+
+            sensors_section["definitions"] = definitions
+            config_yaml["sensors"] = sensors_section
+
+            # Write to disk
+            with open(self._config_path, "w", encoding="utf-8") as f:
+                yaml.safe_dump(
+                    config_yaml,
+                    f,
+                    default_flow_style=False,
+                    sort_keys=False,
+                    allow_unicode=True,
+                    width=1000000,
+                )
+
+            # Update in-memory config
+            self.config["sensors"] = sensors_section
+
+            logger.info("Sensor configuration updated and saved to %s", self._config_path)
+            return self._success(
+                {
+                    "saved": True,
+                    "restart_required": True,
+                    "message": "Sensor configuration saved. A restart is required to apply changes.",
+                }
+            )
+        except cherrypy.HTTPError:
+            raise
+        except Exception as e:
+            logger.error(f"Error updating sensor config: {e}", exc_info=True)
+            return self._error(str(e))
+
+    @cherrypy.expose
+    @cherrypy.tools.json_out()
+    def sensors_read(self):
+        """Trigger a one-shot read of all configured sensors and return results.
+
+        POST /api/sensors/read
+        """
+        try:
+            from repeater.sensors.manager import SensorManager
+
+            manager = SensorManager(self.config)
+            readings = manager.read_all()
+            summary = manager.get_summary()
+
+            return self._success({
+                "readings": readings,
+                "summary": {
+                    "enabled": summary["enabled"],
+                    "poll_interval_seconds": summary["poll_interval_seconds"],
+                    "configured": summary["configured"],
+                    "loaded": summary["loaded"],
+                    "running": summary["running"],
+                },
+            })
+        except Exception as e:
+            logger.error(f"Error reading sensors: {e}", exc_info=True)
+            return self._error(str(e))
+
     # ======================
     # OpenAPI Documentation
     # ======================

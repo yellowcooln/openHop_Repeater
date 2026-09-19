@@ -47,6 +47,12 @@ _STATUS_MEASURING = 0x08
 class BME280Sensor(SensorBase):
     sensor_type = "bme280"
 
+    _settings_schema = [
+        {"key": "i2c_address", "type": "string", "label": "I2C Address", "default": "0x76", "help": "Hex I2C address (e.g. 0x76, 0x77)"},
+        {"key": "bus_number", "type": "integer", "label": "I2C Bus Number", "default": 0, "help": "Linux I2C bus number"},
+        {"key": "read_timeout_seconds", "type": "number", "label": "Read Timeout (s)", "default": 1.0, "help": "Max time to wait for measurement"},
+    ]
+
     def __init__(self, name: str, config: Optional[Dict[str, Any]] = None, log=None):
         super().__init__(name=name, config=config, log=log)
 

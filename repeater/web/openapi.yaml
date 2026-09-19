@@ -60,6 +60,8 @@ tags:
     description: Room server messaging
   - name: Plugins
     description: External plugin install and lifecycle management
+  - name: Sensors
+    description: Sensor manager — types, configuration, and readings
 
 paths:
   # ============================================================================
@@ -856,6 +858,275 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SuccessResponse'
+
+  # ============================================================================
+  # Sensors Endpoints
+  # ============================================================================
+  /sensors_types:
+    get:
+      tags: [Sensors]
+      summary: List available sensor types
+      description: Returns all registered sensor types with their settings schemas.
+      responses:
+        '200':
+          description: Sensor types list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      types:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            type:
+                              type: string
+                            name:
+                              type: string
+                            description:
+                              type: string
+                            settings:
+                              type: array
+                              items:
+                                type: object
+                                properties:
+                                  key:
+                                    type: string
+                                  type:
+                                    type: string
+                                    enum: [string, integer, number]
+                                  label:
+                                    type: string
+                                  default:
+                                    type: object
+                                  help:
+                                    type: string
+
+  /sensors_config:
+    get:
+      tags: [Sensors]
+      summary: Get current sensor configuration
+      description: Returns the current sensor definitions from config.yaml.
+      responses:
+        '200':
+          description: Sensor configuration
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      enabled:
+                        type: boolean
+                      poll_interval_seconds:
+                        type: number
+                      auto_install_packages:
+                        type: boolean
+                      definitions:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            name:
+                              type: string
+                            type:
+                              type: string
+                            enabled:
+                              type: boolean
+                            auto_install_packages:
+                              type: boolean
+                            settings:
+                              type: object
+
+    post:
+      tags: [Sensors]
+      summary: Update sensor configuration
+      description: |
+        Update sensor definitions and persist to config.yaml.
+        Requires POST body with enabled, poll_interval_seconds, auto_install_packages, and definitions array.
+        Always returns restart_required=true.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled:
+                  type: boolean
+                poll_interval_seconds:
+                  type: number
+                  default: 30.0
+                auto_install_packages:
+                  type: boolean
+                  default: false
+                definitions:
+                  type: array
+                  items:
+                    type: object
+                    required: [name, type]
+                    properties:
+                      name:
+                        type: string
+                      type:
+                        type: string
+                      enabled:
+                        type: boolean
+                      auto_install_packages:
+                        type: boolean
+                      settings:
+                        type: object
+            example:
+              enabled: true
+              poll_interval_seconds: 30.0
+              definitions:
+                - name: living-room-temp
+                  type: bme280
+                  enabled: true
+                  settings:
+                    i2c_address: "0x76"
+                    bus_number: 0
+      responses:
+        '200':
+          description: Configuration saved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      saved:
+                        type: boolean
+                      restart_required:
+                        type: boolean
+                      message:
+                        type: string
+        '405':
+          description: Method not allowed
+
+  /sensors_config_update:
+    post:
+      tags: [Sensors]
+      summary: Update sensor configuration (locked)
+      description: |
+        Update sensor definitions and persist to config.yaml.
+        Uses provisioning lock. Always returns restart_required=true.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled:
+                  type: boolean
+                poll_interval_seconds:
+                  type: number
+                  default: 30.0
+                auto_install_packages:
+                  type: boolean
+                  default: false
+                definitions:
+                  type: array
+                  items:
+                    type: object
+                    required: [name, type]
+                    properties:
+                      name:
+                        type: string
+                      type:
+                        type: string
+                      enabled:
+                        type: boolean
+                      auto_install_packages:
+                        type: boolean
+                      settings:
+                        type: object
+            example:
+              enabled: true
+              poll_interval_seconds: 30.0
+              definitions:
+                - name: living-room-temp
+                  type: bme280
+                  enabled: true
+                  settings:
+                    i2c_address: "0x76"
+                    bus_number: 0
+      responses:
+        '200':
+          description: Configuration saved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      saved:
+                        type: boolean
+                      restart_required:
+                        type: boolean
+                      message:
+                        type: string
+
+  /sensors_read:
+    post:
+      tags: [Sensors]
+      summary: Trigger one-shot sensor read
+      description: Triggers an immediate read of all configured sensors and returns results.
+      responses:
+        '200':
+          description: Sensor readings
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      readings:
+                        type: array
+                        items:
+                          type: object
+                      summary:
+                        type: object
+                        properties:
+                          enabled:
+                            type: boolean
+                          poll_interval_seconds:
+                            type: number
+                          configured:
+                            type: integer
+                          loaded:
+                            type: integer
+                          running:
+                            type: boolean
 
   # ============================================================================
   # Packet Endpoints

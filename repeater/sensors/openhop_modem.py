@@ -34,6 +34,17 @@ class OpenHopModemSensor(SensorBase):
 
     sensor_type = "openhop_modem"
 
+    _settings_schema = [
+        {"key": "host", "type": "string", "label": "Host", "default": "", "help": "Modem hostname or IP address"},
+        {"key": "port", "type": "integer", "label": "Port", "default": 5055, "help": "Modem HTTP port"},
+        {"key": "scheme", "type": "string", "label": "Scheme", "default": "http", "help": "HTTP or HTTPS"},
+        {"key": "endpoint", "type": "string", "label": "Endpoint", "default": "/api/stats", "help": "Stats API path"},
+        {"key": "username", "type": "string", "label": "Username", "default": "admin", "help": "Basic auth username"},
+        {"key": "password", "type": "string", "label": "Password", "default": "", "help": "Basic auth password (not stored in API responses)"},
+        {"key": "poll_interval_seconds", "type": "number", "label": "Poll Interval (s)", "default": 60.0, "help": "How often to poll"},
+        {"key": "timeout_seconds", "type": "number", "label": "Timeout (s)", "default": 2.0, "help": "Request timeout"},
+    ]
+
     def __init__(self, name: str, config: Optional[Dict[str, Any]] = None, log=None):
         super().__init__(name=name, config=config, log=log)
         self.poll_interval_seconds = float(self.settings.get("poll_interval_seconds", 60.0))
