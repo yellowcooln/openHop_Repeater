@@ -319,6 +319,35 @@ else
     [ -n "$txen_pin" ] && sed "${SED_OPTS[@]}" "s/^  txen_pin:.*/  txen_pin: $txen_pin/" "$CONFIG_FILE"
     [ -n "$rxen_pin" ] && sed "${SED_OPTS[@]}" "s/^  rxen_pin:.*/  rxen_pin: $rxen_pin/" "$CONFIG_FILE"
 
+    # EN settings are scoped to the standard 2-space sx1262 section.
+    # Compact JSON arrays are valid YAML; keep other config text/comments intact.
+    # Remove both old forms (including block lists) so stale en_pins cannot win.
+    en_pin=$(echo "$hw_config" | jq -r '.en_pin // empty')
+    en_pins=$(echo "$hw_config" | jq -c '.en_pins // empty')
+    if [ -n "$en_pin" ] || [ -n "$en_pins" ]; then
+        if [ -n "$en_pins" ]; then
+            en_key=en_pins
+            en_value="$en_pins"
+        else
+            en_key=en_pin
+            en_value="$en_pin"
+        fi
+        awk -v en_key="$en_key" -v en_value="$en_value" '
+            /^sx1262:[[:space:]]*(#.*)?$/ {
+                in_sx1262 = 1
+                print
+                print "  " en_key ": " en_value
+                next
+            }
+            /^[^[:space:]#]/ { in_sx1262 = 0; removing_en = 0 }
+            in_sx1262 && /^  en_pins?:/ { removing_en = 1; next }
+            in_sx1262 && removing_en && /^  [[:space:]]*-([[:space:]]|$)/ { next }
+            /[^[:space:]]/ && !/^[[:space:]]*#/ { removing_en = 0 }
+            { print }
+        ' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" &&
+            cat "$CONFIG_FILE.tmp" > "$CONFIG_FILE" && rm "$CONFIG_FILE.tmp" || exit 1
+    fi
+
     # Handle LED pins - add if missing, update if present
     if [ -n "$txled_pin" ]; then
         if grep -q "^  txled_pin:" "$CONFIG_FILE"; then
