@@ -131,6 +131,53 @@ def test_empty_inventory_and_legacy_definitions_key(monkeypatch):
     ]
 
 
+def test_modem_inventory_has_only_safe_loaded_origin_and_effective_cadence(monkeypatch):
+    from repeater.sensors.openhop_modem import OpenHopModemSensor
+
+    registry = Mock()
+    registry.create.side_effect = lambda sensor_type, name, config: OpenHopModemSensor(name, config)
+    monkeypatch.setattr(SensorManager, "_load_sensor_module", lambda self, sensor_type: None)
+    manager = SensorManager(
+        {
+            "sensors": {
+                "enabled": True,
+                "definitions": [
+                    {
+                        "type": "openhop_modem",
+                        "name": "ether",
+                        "settings": {
+                            "base_url": "https://user:private-password@MODEM.local:80/private-path?private-query",
+                            "token": "private-token",
+                            "poll_interval_seconds": 7,
+                        },
+                    }
+                ],
+            }
+        },
+        registry=registry,
+    )
+    entry = manager.get_summary()["inventory"][0]
+    assert entry["source_host"] == "modem.local"
+    assert entry["poll_interval_seconds"] == 7
+    assert "private" not in json.dumps(manager.get_summary())
+    assert manager.get_summary()["readings"] == []
+
+
+def test_modem_inventory_canonicalizes_ipv6_without_brackets(monkeypatch):
+    registry = Mock()
+    registry.create.return_value = SimpleNamespace(
+        url="http://[2001:0DB8:0:0:0:0:0:1]:80/private?token=private",
+        poll_interval_seconds=5,
+    )
+    monkeypatch.setattr(SensorManager, "_load_sensor_module", lambda self, sensor_type: None)
+    manager = SensorManager(
+        {"sensors": {"enabled": True, "definitions": [{"type": "openhop_modem", "name": "v6"}]}},
+        registry=registry,
+    )
+    assert manager.get_summary()["inventory"][0]["source_host"] == "2001:db8::1"
+    assert "private" not in json.dumps(manager.get_summary())
+
+
 def test_stats_openapi_inventory_is_an_allowlisted_additive_field():
     path = Path(__file__).resolve().parents[1] / "repeater/web/openapi.yaml"
     document = yaml.safe_load(path.read_text())
@@ -150,4 +197,6 @@ def test_stats_openapi_inventory_is_an_allowlisted_additive_field():
         "type": "string",
         "enabled": "boolean",
         "loaded": "boolean",
+        "source_host": "string",
+        "poll_interval_seconds": "number",
     }

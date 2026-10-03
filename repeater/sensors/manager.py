@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import importlib
+import ipaddress
 import logging
+import math
+import re
 import threading
 import time
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 from .registry import SensorRegistry
 
@@ -91,6 +95,30 @@ class SensorManager:
             self.sensors.append(sensor)
             # Instantiation, not successful reads or connection health.
             entry["loaded"] = True
+            if entry["type"] in {"openhop_modem", "pymc_modem"}:
+                # Loaded plugin metadata only: never copy settings, paths or auth.
+                url = getattr(sensor, "url", None)
+                if isinstance(url, str) and not re.search(r"[\s\\]", url):
+                    try:
+                        parsed = urlparse(url)
+                        host = parsed.hostname
+                        port = parsed.port  # Reject malformed/out-of-range ports.
+                        if (
+                            parsed.scheme in {"http", "https"}
+                            and host
+                            and re.fullmatch(r"[a-zA-Z0-9.:-]+", host)
+                            and (port is None or 0 < port <= 65535)
+                        ):
+                            entry["source_host"] = (
+                                ipaddress.IPv6Address(host).compressed
+                                if ":" in host
+                                else host.lower()
+                            )
+                    except ValueError:
+                        pass
+                interval = getattr(sensor, "poll_interval_seconds", None)
+                if isinstance(interval, (int, float)) and math.isfinite(interval) and interval > 0:
+                    entry["poll_interval_seconds"] = max(0.1, float(interval))
 
     def start(self) -> None:
         if self._running:
