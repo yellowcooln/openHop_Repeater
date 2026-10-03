@@ -5857,6 +5857,24 @@ components:
           description: Optional snapshot descriptors; absent for unchanged plug-ins. No sensor history or RF telemetry implied.
           items:
             $ref: '#/components/schemas/SensorMetricDescriptor'
+    SensorInventoryEntry:
+      type: object
+      description: Safe configured identity/status at the last sensor reload; includes disabled and failed-to-load definitions, regardless of cached readings. No settings, credentials, URLs, or load errors.
+      additionalProperties: false
+      required: [name, type, enabled, loaded]
+      properties:
+        name:
+          type: string
+          description: Configured name, falling back to the configured type or sensor as in sensor loading.
+        type:
+          type: string
+          description: Registry-normalized configured type (trimmed and lowercase); empty for a missing or invalid type.
+        enabled:
+          type: boolean
+          description: Whether this definition is enabled, defaulting to true.
+        loaded:
+          type: boolean
+          description: Whether this definition instantiated a sensor, not whether its connection or latest reading is healthy.
     SensorSummary:
       type: object
       properties:
@@ -5870,6 +5888,11 @@ components:
           type: integer
         running:
           type: boolean
+        inventory:
+          type: array
+          description: Additive configured sensor inventory, independent of latest readings.
+          items:
+            $ref: '#/components/schemas/SensorInventoryEntry'
         readings:
           type: array
           items:

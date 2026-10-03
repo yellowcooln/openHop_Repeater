@@ -59,12 +59,24 @@ class SensorManager:
 
     def reload(self) -> None:
         self.sensors = []
+        self._inventory: list[dict[str, Any]] = []
         for definition in self._get_sensor_definitions():
+            sensor_type = definition.get("type")
+            name = definition.get("name") or str(sensor_type or "sensor")
+            # Only scalar identity/status metadata, never plugin settings or errors.
+            inventory_name = definition.get("name") or (
+                sensor_type if isinstance(sensor_type, str) and sensor_type else "sensor"
+            )
+            entry = {
+                "name": inventory_name if isinstance(inventory_name, str) else "sensor",
+                "type": sensor_type.strip().lower() if isinstance(sensor_type, str) else "",
+                "enabled": bool(definition.get("enabled", True)),
+                "loaded": False,
+            }
+            self._inventory.append(entry)
             if not definition.get("enabled", True):
                 continue
 
-            sensor_type = definition.get("type")
-            name = definition.get("name") or str(sensor_type or "sensor")
             if not sensor_type:
                 self.log.warning("Skipping sensor definition %r: missing type", name)
                 continue
@@ -77,6 +89,8 @@ class SensorManager:
                 continue
 
             self.sensors.append(sensor)
+            # Instantiation, not successful reads or connection health.
+            entry["loaded"] = True
 
     def start(self) -> None:
         if self._running:
@@ -203,4 +217,5 @@ class SensorManager:
             "loaded": len(self.sensors),
             "running": self._running,
             "readings": readings,
+            "inventory": [dict(entry) for entry in self._inventory],
         }

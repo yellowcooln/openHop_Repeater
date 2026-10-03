@@ -22,6 +22,75 @@ class HardwareStatsCollector:
     def __init__(self):
 
         self.start_time = time.time()
+        # Stable optional metadata: probe once, including when sources are absent.
+        self._hardware_models = self._get_hardware_models()
+
+    @staticmethod
+    def _get_hardware_models():
+        models = {}
+        if platform.system() != "Linux":
+            return models
+        for path in (
+            "/sys/firmware/devicetree/base/model",
+            "/proc/device-tree/model",
+            "/sys/class/dmi/id/product_name",
+        ):
+            try:
+                with open(path, "rb") as source:
+                    raw = source.read(513)
+                if len(raw) <= 512:
+                    model = raw.decode("utf-8").rstrip("\x00").strip()
+                    if HardwareStatsCollector._valid_model(model):
+                        models["system"] = model
+                        break
+            except (OSError, UnicodeError):
+                continue
+
+        # Only descriptive CPU fields: numeric model/processor IDs and ARM
+        # Hardware identify something else. Never expose Serial/UUID fields.
+        try:
+            with open("/proc/cpuinfo", "rb") as source:
+                raw = source.read(65536)
+            # Ignore an incomplete final line rather than publishing a prefix.
+            lines = raw.rpartition(b"\n")[0].decode("utf-8").splitlines()
+            candidates = {}
+            for line in lines:
+                key, sep, value = line.partition(":")
+                key = key.strip().lower()
+                model = value.strip()
+                if (
+                    sep
+                    and key in ("model name", "cpu model", "processor")
+                    and HardwareStatsCollector._valid_model(model)
+                    and not model.isdecimal()
+                ):
+                    candidates.setdefault(key, model)
+            for key in ("model name", "cpu model", "processor"):
+                if key in candidates:
+                    models["cpu"] = candidates[key]
+                    break
+        except (OSError, UnicodeError):
+            pass
+        return models
+
+    @staticmethod
+    def _valid_model(model):
+        return (
+            bool(model)
+            and len(model) <= 512
+            and all(char.isprintable() for char in model)
+            and model.casefold()
+            not in {
+                "unknown",
+                "none",
+                "not specified",
+                "not applicable",
+                "default string",
+                "system product name",
+                "to be filled by o.e.m.",
+                "to be filled by o.e.m",
+            }
+        )
 
     def get_stats(self):
 
@@ -106,6 +175,9 @@ class HardwareStatsCollector:
                     "arch": system_info["arch"],
                 },
             }
+
+            for section, model in self._hardware_models.items():
+                stats[section]["model"] = model
 
             # Add temperatures if available
             if temperatures:
