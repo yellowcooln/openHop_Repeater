@@ -87,6 +87,12 @@ def _secret(value):
 
 
 def _validate_certificate(bundle):
+    _validate_certificate_snapshot(bundle, historical=False)
+
+
+def _validate_certificate_snapshot(bundle, *, historical):
+    # Private protected-history validation only. Operational loaders always use
+    # _validate_certificate and must reject expired CURRENT certificates.
     # Lazy imports preserve observation-only mode in old installations.
     from cryptography import x509
     from cryptography.hazmat.primitives import serialization
@@ -108,7 +114,7 @@ def _validate_certificate(bundle):
         raise EnrollmentError("Issued certificate key mismatch")
     now = datetime.now(timezone.utc)
     for item in (ca, cert):
-        if not item.not_valid_before_utc <= now < item.not_valid_after_utc:
+        if item.not_valid_before_utc > now or (not historical and now >= item.not_valid_after_utc):
             raise EnrollmentError("Certificate outside validity period")
     device_id = bundle["device_id"]
     if cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME) != [

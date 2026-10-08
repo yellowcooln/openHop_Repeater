@@ -1,8 +1,8 @@
-"""Inactive offline completion receipt and matched key/journal retirement.
+"""Durable completion receipts and matched key/journal retirement.
 
 Acceptance is a node assertion, not broker proof. The retained previous bundle
 is secret historical backup material, never runtime authority or rollback.
-No handler calls, new cycles, provisioning, network or expired-current recovery.
+Handler reconciliation uses this core without provisioning or expired-current recovery.
 """
 
 import fcntl
@@ -91,7 +91,7 @@ def _response(current):
 
 
 @contextmanager
-def _authority(credentials, store_dir, credential_file):
+def _authority(credentials, store_dir, credential_file, *, require_rotation=True):
     fds = []
     try:
         path = os.fspath(credential_file)
@@ -124,7 +124,8 @@ def _authority(credentials, store_dir, credential_file):
         context = r._context(current)
         if r._context(credentials) != context or not r._same_bundle(current, credentials):
             raise EnrollmentError("Installed credential mismatch")
-        _response(current)
+        if require_rotation:
+            _response(current)
         binding = {
             "version": 1,
             "base_url": context["base_url"],
@@ -188,6 +189,9 @@ def _historical_journal(journal, current, context, binding):
     previous = journal["previous_bundle"]
     if not isinstance(previous, dict) or r._bundle_digest(previous) != journal["previous_sha256"]:
         raise EnrollmentError("Historical backup digest mismatch")
+    if r._context_snapshot(previous, historical=True) != context:
+        raise EnrollmentError("Historical backup certificate mismatch")
+    r._single_certificate(previous["client_cert"])
     for k in ("base_url", "device_id", "operational_token", "pubkey"):
         if type(previous[k]) is not str or previous[k] != current[k]:
             raise EnrollmentError("Historical backup context mismatch")
@@ -269,10 +273,7 @@ def _remaining(
     ):
         raise EnrollmentError("Foreign remaining pending request")
     journal = _optional(directory, "install.json", r._JOURNAL_LIMIT)
-    if journal is not None and (
-        successor or not _equal(journal, value["install_journal"], r._JOURNAL_LIMIT)
-    ):
-        raise EnrollmentError("Foreign remaining installation journal")
+    r._cycle_phase(current, pending, value, journal, binding["credential_file"])
     accepted = _optional(directory, q._ACCEPTED, 8192)
     if accepted is not None:
         _accepted(accepted, current, binding)
@@ -359,10 +360,15 @@ def complete_rotation(credentials, *, store_dir, credential_file, commit_guard=N
         with _authority(credentials, store_dir, credential_file) as authority:
             directory, parent, name, current, snapshot, context, binding = authority
             value = _optional(directory, _COMPLETED, _LIMIT)
-            creating = value is None
+            pending = r._read_pending(directory, context)
+            journal = _optional(directory, "install.json", r._JOURNAL_LIMIT)
+            phase = r._cycle_phase(current, pending, value, journal, binding["credential_file"])
+            creating = phase == "installed"
             if creating:
                 value = _create(directory, current, context, binding)
             else:
+                if phase != "completed":
+                    raise EnrollmentError("Successor rotation is not complete")
                 _validate(value, current, context, binding)
             _remaining(directory, value, current, context, binding)
             reread, raw = _read_private_json(parent, name, r._BUNDLE_LIMIT)
@@ -397,6 +403,41 @@ def complete_rotation(credentials, *, store_dir, credential_file, commit_guard=N
         raise EnrollmentError("Unable to complete durable private Glass rotation") from None
 
 
+def reconcile_rotation(credentials, *, store_dir, credential_file, commit_guard=None):
+    """Finish an exactly acknowledged current cycle; never retire a successor.
+
+    The second lock acquisition in complete_rotation revalidates everything.
+    A cooperating successor appearing between reads is rejected, not removed.
+    """
+    try:
+        with _authority(
+            credentials, store_dir, credential_file, require_rotation=False
+        ) as authority:
+            directory, _, _, current, _, context, binding = authority
+            value = _optional(directory, _COMPLETED, _LIMIT)
+            pending = r._read_pending(directory, context)
+            journal = _optional(directory, "install.json", r._JOURNAL_LIMIT)
+            phase = r._cycle_phase(current, pending, value, journal, binding["credential_file"])
+            if phase == "previous":
+                return False
+            if _optional(directory, q._OUTBOX, 4096) is not None:
+                return False
+            accepted = _optional(directory, q._ACCEPTED, 8192)
+            if phase == "installed" and accepted is None:
+                return False
+            if accepted is not None:
+                _accepted(accepted, current, binding)
+        complete_rotation(
+            credentials,
+            store_dir=store_dir,
+            credential_file=credential_file,
+            commit_guard=commit_guard,
+        )
+        return True
+    except Exception:  # noqa: BLE001 - protect private state
+        raise EnrollmentError("Unable to reconcile private Glass rotation completion") from None
+
+
 def load_completed(credentials, *, store_dir, credential_file):
     """Read completion/current/remaining authority; never write or retire state."""
     try:
@@ -405,7 +446,11 @@ def load_completed(credentials, *, store_dir, credential_file):
             value = _optional(directory, _COMPLETED, _LIMIT)
             if value is None:
                 return None
-            _validate(value, current, context, binding)
+            pending = r._read_pending(directory, context)
+            journal = _optional(directory, "install.json", r._JOURNAL_LIMIT)
+            phase = r._cycle_phase(current, pending, value, journal, binding["credential_file"])
+            if phase == "installed":
+                return None
             _remaining(directory, value, current, context, binding)
             return _public(current)
     except Exception:  # noqa: BLE001 - never expose secret-bearing errors

@@ -447,6 +447,7 @@ class GlassHandler:
 
             def flush():
                 from repeater.glass.enrollment import load_credentials, post_verified_json
+                from repeater.glass.rotation_completion import reconcile_rotation
                 from repeater.glass.rotation_reports import (
                     acknowledge_report,
                     load_report,
@@ -503,6 +504,7 @@ class GlassHandler:
                         # persisted outbox is authority to send HTTP.
                         report = load_report(current, **options)
                 if report is None:
+                    reconcile_rotation(current, **options, commit_guard=check_runtime)
                     return False
                 check_current()
                 response = post_verified_json(
@@ -518,6 +520,8 @@ class GlassHandler:
                 acknowledge_report(
                     current, report, response, **options, commit_guard=check_runtime
                 )
+                check_current()
+                reconcile_rotation(current, **options, commit_guard=check_runtime)
                 return True
 
             try:
@@ -552,10 +556,17 @@ class GlassHandler:
                     )
 
             bound = binding()
+            cancelled_event = threading.Event()
+
+            def check_runtime():
+                with self._mqtt_lock:
+                    if cancelled_event.is_set() or self.config != snapshot or binding() != bound:
+                        raise ValueError("Glass maintenance binding changed")
 
             def maintain():
                 from cryptography import x509
 
+                from repeater.glass.rotation_completion import reconcile_rotation
                 from repeater.glass.rotation_transport import renew_credentials, rotation_pending
 
                 candidate._reload_runtime_settings()
@@ -566,6 +577,15 @@ class GlassHandler:
                 )
                 due = (cert.not_valid_after_utc - datetime.now(timezone.utc)).total_seconds() <= 86400
                 pending = rotation_pending(candidate.cert_store_dir)
+                if pending or candidate._operational_credentials.get("rotation_request_id"):
+                    check_runtime()
+                    reconcile_rotation(
+                        candidate._operational_credentials,
+                        store_dir=candidate.cert_store_dir,
+                        credential_file=candidate.operational_credential_file,
+                        commit_guard=check_runtime,
+                    )
+                    pending = rotation_pending(candidate.cert_store_dir)
                 if not due and not pending:
                     return False
                 renew_credentials(
@@ -601,6 +621,7 @@ class GlassHandler:
                             await asyncio.shield(worker)
                         except asyncio.CancelledError as exc:
                             cancelled = exc
+                            cancelled_event.set()
                             self._invalidate_runtime_settings()
                         except Exception:  # noqa: BLE001 - retrieve executor failure below
                             # Retrieve the worker error below, including when

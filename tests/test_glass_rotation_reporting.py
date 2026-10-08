@@ -612,7 +612,18 @@ def test_real_exact_route_body_trust_ack(installed, paho, monkeypatch):
     assert json.loads(state(installed, "report-accepted.json").read_bytes())["report"] == calls[0]
     flush(handler)
     assert len(calls) == 1  # already accepted callback doesn't create more HTTP
-    assert all(state(installed, name).read_bytes() == data for name, data in before.items())
+    # Integrated lifecycle retires exactly the acknowledged installed request.
+    assert not state(installed, "pending.json").exists()
+    assert not state(installed, "install.json").exists()
+    completed = json.loads(state(installed, "completed.json").read_bytes())
+    assert completed["request_id"] == installed[0]["rotation_request_id"]
+    assert completed["install_journal"] == json.loads(before["install.json"])
+    assert (
+        completed["pending_sha256"]
+        == hashlib.sha256(
+            q.r._canonical_json(json.loads(before["pending.json"]), q.r._LIMIT)
+        ).hexdigest()
+    )
 
 
 @pytest.mark.parametrize("current_callback", [False, True])
@@ -880,7 +891,7 @@ def test_ack_admission_wait_boundary(unit_handler, monkeypatch, caplog, change, 
         if not admitted:
             waiting.set()
             assert release.wait(5)
-        yield 123, current, {}, None
+        yield 123, current, {}, None, False
 
     def record(directory, name, *a, accepted_fallback=None):
         assert accepted_fallback is None

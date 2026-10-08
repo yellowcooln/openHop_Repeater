@@ -586,21 +586,39 @@ def test_real_walltime_expiry_report_authority(
     target = enroll_fixture[0]["credential_file"]
     case = json.loads(target.read_bytes()), tmp_path, target
     before = snapshot(case)
-    if expired == "old_completed":
+    if expired in ("old_completed", "old_uncompleted"):
+        saved = json.loads(before["completed.json"])
         report = queue(case)
-        assert acknowledge(case, report) == ack(report)
+        assert report == saved["accepted_record"]["report"]
+        assert acknowledge(case, report) == saved["accepted_record"]["ack"] == ack(report)
         assert q.load_report(case[0], **args(case)) is None
         assert snapshot(case) == before
         new = queue(case, NEXT_BOOT)
-        acknowledge(case, new)
-        assert state(case, "completed.json").read_bytes() == before["completed.json"]
+        assert new["boot_id"] == NEXT_BOOT
+        assert new["boot_id"] != report["boot_id"]
+        assert q.load_report(case[0], **args(case)) == new
+        assert acknowledge(case, new) == ack(new)
+        assert q.load_report(case[0], **args(case)) is None
+        after = snapshot(case)
+        accepted_record = json.loads(after["report-accepted.json"])
+        assert accepted_record["report"] == new
+        assert accepted_record["ack"] == ack(new)
+        assert after == dict(before, **{"report-accepted.json": after["report-accepted.json"]})
+        completed = c.load_completed(case[0], **args(case))
+        assert completed is not None
+        assert completed["state"] == "rotation_completed"
+        assert snapshot(case) == after
     else:
         report = json.loads(state(case, "report-accepted.json").read_bytes())["report"]
+        guards = []
         for call in (
             lambda: queue(case, NEXT_BOOT),
             lambda: q.load_report(case[0], **args(case)),
-            lambda: acknowledge(case, report),
+            lambda: q.acknowledge_report(
+                case[0], report, ack(report), **args(case), commit_guard=lambda: guards.append(1)
+            ),
         ):
             with pytest.raises(e.EnrollmentError):
                 call()
-        assert snapshot(case) == before
+            assert snapshot(case) == before
+        assert not guards

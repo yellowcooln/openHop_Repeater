@@ -1,8 +1,8 @@
-"""Inactive offline CSR preparation, candidate validation and bundle installation.
+"""Durable CSR preparation, cycle authority and atomic bundle installation.
 
 One runtime UID is trusted. Existing state is never repaired or regenerated;
 explicit future recovery is required for a different enrollment generation.
-No handler activation, transport, acknowledgment or request retirement here.
+Transport and handler consume this core; it does not itself activate MQTT.
 """
 
 import fcntl
@@ -35,6 +35,7 @@ _FIELDS = {
 _V2_FIELDS = _FIELDS | {"previous_completed_sha256"}
 _fsync = os.fsync
 _replace = os.replace
+_unlink = os.unlink
 
 
 def _check_private(fd, *, directory=False):
@@ -44,6 +45,10 @@ def _check_private(fd, *, directory=False):
 
 
 def _context(credentials):
+    return _context_snapshot(credentials, historical=False)
+
+
+def _context_snapshot(credentials, *, historical):
     # Validate the already-loaded bundle before any filesystem operation. This
     # intentionally rejects expired leaves; there is no implicit recovery loader.
     if not isinstance(credentials, dict):
@@ -56,7 +61,12 @@ def _context(credentials):
     if origin != bundle["base_url"]:
         raise EnrollmentError("Noncanonical enrollment origin")
     _secret(bundle["operational_token"])
-    _validate_certificate(bundle)
+    if historical:
+        from repeater.glass.enrollment import _validate_certificate_snapshot
+
+        _validate_certificate_snapshot(bundle, historical=True)
+    else:
+        _validate_certificate(bundle)
     return {
         "base_url": origin,
         "device_id": bundle["device_id"],
@@ -188,13 +198,13 @@ def _new_pending(context, *, previous_completed_sha256=None):
     return value
 
 
-def _validate_successor_pending(state, current, completed, context, binding):
+def _validate_successor_pending(state, current, completed, context, binding, *, historical=False):
     """Pure receipt-linked next-key authority; never filesystem or lock access."""
     from cryptography.hazmat.primitives import serialization
 
     from repeater.glass import rotation_completion as c
 
-    if _context(current) != context:
+    if _context_snapshot(current, historical=historical) != context:
         raise EnrollmentError("Successor current context mismatch")
     c._response(current)
     if binding != {
@@ -227,7 +237,9 @@ def _validate_successor_pending(state, current, completed, context, binding):
     return state
 
 
-def _successor_authority(directory, credentials, context, completed, credential_file):
+def _successor_authority(
+    directory, credentials, context, completed, credential_file, *, pending=None, journal=None
+):
     """Validate existing current filename under the caller's already-held lock."""
     from repeater.glass import rotation_completion as c
     from repeater.glass import rotation_reports as q
@@ -258,7 +270,10 @@ def _successor_authority(directory, credentials, context, completed, credential_
             "credential_file": path,
             "candidate_sha256": _bundle_digest(current),
         }
-        c._validate(completed, current, context, binding)
+        if pending is not None or journal is not None:
+            _cycle_phase(current, pending, completed, journal, path)
+        else:
+            c._validate(completed, current, context, binding)
         accepted = c._optional(directory, q._ACCEPTED, 8192)
         if accepted is not None:
             c._accepted(accepted, current, binding)
@@ -343,7 +358,24 @@ def prepare_rotation(credentials, *, store_dir, credential_file=None, commit_gua
         else:
             journal_present = True
         if journal_present and (completed is not None or state is None or state["version"] == 2):
-            raise EnrollmentError("Prior rotation retirement incomplete")
+            journal = c._optional(directory_fd, "install.json", _JOURNAL_LIMIT)
+            current, binding = _successor_authority(
+                directory_fd,
+                credentials,
+                context,
+                completed,
+                credential_file,
+                pending=state,
+                journal=journal,
+            )
+            phase = _cycle_phase(current, state, completed, journal, os.fspath(credential_file))
+            if phase == "installed":
+                if commit_guard is not None:
+                    commit_guard()
+                _fsync(directory_fd)
+                return {field: state[field] for field in ("device_id", "request_id", "csr_pem")}
+            if phase != "previous" or state is None:
+                raise EnrollmentError("Prior rotation retirement incomplete")
         marker = None
         if completed is not None:
             current, binding = _successor_authority(
@@ -356,6 +388,8 @@ def prepare_rotation(credentials, *, store_dir, credential_file=None, commit_gua
                 c._no_outbox(directory_fd)
         elif state is not None and state["version"] == 2:
             raise EnrollmentError("Missing successor completion authority")
+        elif state is None and credentials.get("rotation_request_id") is not None:
+            raise EnrollmentError("Missing completed-current receipt")
         if state is None:
             state = _validate_pending(
                 _new_pending(context, previous_completed_sha256=marker), context
@@ -600,10 +634,92 @@ def _validate_install_journal(journal, context, state, path):
         if not re.fullmatch("[0-9a-f]{64}", journal[field]):
             raise EnrollmentError("Invalid installation journal digest")
     previous = journal["previous_bundle"]
-    if _context(previous) != context or _bundle_digest(previous) != journal["previous_sha256"]:
+    _single_certificate(previous["client_cert"])
+    _single_certificate(previous["ca_cert"])
+    if (
+        _context_snapshot(previous, historical=True) != context
+        or _bundle_digest(previous) != journal["previous_sha256"]
+    ):
         raise EnrollmentError("Installation journal backup mismatch")
     _canonical_json(journal, _JOURNAL_LIMIT)
     return previous
+
+
+def _cycle_binding(current, path):
+    context = _context_snapshot(current, historical=True)
+    return {
+        "version": 1,
+        "base_url": context["base_url"],
+        "generation_sha256": context["generation_sha256"],
+        "credential_file": path,
+        "candidate_sha256": _bundle_digest(current),
+    }
+
+
+def _cycle_phase(current, pending, completed, journal, path):
+    """Pure authority for existing formats; caller owns the fixed state lock.
+
+    Historical relaxation is confined to journal snapshots. CURRENT and the
+    installed candidate always retain operational certificate validation.
+    """
+    from repeater.glass import rotation_completion as c
+
+    context = _context(current)
+    binding = _cycle_binding(current, path)
+    if completed is not None and not isinstance(completed, dict):
+        raise EnrollmentError("Invalid cycle completion receipt")
+    if pending is not None:
+        _validate_pending(pending, context)
+    current_completed = completed is not None and completed.get("request_id") == current.get(
+        "rotation_request_id"
+    )
+    if current_completed:
+        c._validate(completed, current, context, binding)
+        if pending is None or pending["request_id"] == completed["request_id"]:
+            if pending is not None and (
+                pending["private_key"] != current["private_key"]
+                or c._digest(pending, _LIMIT) != completed["pending_sha256"]
+            ):
+                raise EnrollmentError("Foreign completed pending state")
+            if journal is not None and not c._equal(
+                journal, completed["install_journal"], _JOURNAL_LIMIT
+            ):
+                raise EnrollmentError("Foreign completed journal")
+            return "completed"
+        _validate_successor_pending(pending, current, completed, context, binding)
+        if journal is not None:
+            previous = _validate_install_journal(journal, context, pending, path)
+            if not _same_bundle(previous, current):
+                raise EnrollmentError("Successor journal predecessor mismatch")
+        return "previous"
+    if pending is None:
+        raise EnrollmentError("Missing cycle pending authority")
+    if journal is None:
+        if completed is not None or pending["version"] != 1:
+            raise EnrollmentError("Missing cycle predecessor journal")
+        if current.get("rotation_request_id") is not None:
+            raise EnrollmentError("Missing installed cycle journal")
+        return "previous"
+    previous = _validate_install_journal(journal, context, pending, path)
+    if pending["version"] == 2:
+        if completed is None:
+            raise EnrollmentError("Missing cycle completion predecessor")
+        _validate_successor_pending(
+            pending, previous, completed, context, _cycle_binding(previous, path), historical=True
+        )
+    elif completed is not None:
+        raise EnrollmentError("Unexpected cycle completion predecessor")
+    elif previous.get("rotation_request_id") is not None:
+        raise EnrollmentError("Missing successor cycle completion")
+    if _same_bundle(current, previous):
+        return "previous"
+    candidate = _build_renewal_candidate(previous, c._response(current), pending)
+    if (
+        not _same_bundle(current, candidate)
+        or _bundle_digest(current) != journal["candidate_sha256"]
+    ):
+        raise EnrollmentError("Cycle installed candidate mismatch")
+    return "installed"
 
 
 def _stage_install(directory_fd, data, stages):
@@ -649,8 +765,9 @@ def install_renewal_candidate(credentials, response, *, store_dir, credential_fi
         state = _read_pending(directory_fd, context)
         if state is None:
             raise EnrollmentError("Missing pending renewal request")
-        if state["version"] == 2:
-            raise EnrollmentError("Successor installation is not enabled")
+        # Reject invalid replacement crypto before even opening its destination;
+        # the locked journal/current authority below still decides cutover.
+        _build_renewal_candidate(caller, value, state)
         parent_fd = m._open_directory(parent)
         parent_info, state_info = os.fstat(parent_fd), os.fstat(directory_fd)
         if (parent_info.st_dev, parent_info.st_ino) == (state_info.st_dev, state_info.st_ino):
@@ -662,6 +779,15 @@ def install_renewal_candidate(credentials, response, *, store_dir, credential_fi
             journal, _ = _read_private_json(directory_fd, "install.json", _JOURNAL_LIMIT)
         except FileNotFoundError:
             journal = None
+        from repeater.glass import rotation_completion as c
+        from repeater.glass import rotation_reports as q
+
+        completed = c._optional(directory_fd, c._COMPLETED, c._LIMIT)
+        phase = _cycle_phase(current, state, completed, journal, path)
+        if phase == "completed":
+            raise EnrollmentError("Completed installation requires retirement")
+        if phase == "previous":
+            c._no_outbox(directory_fd)
         if journal is None:
             if not _same_bundle(current, caller):
                 raise EnrollmentError("Current installation bundle mismatch")
@@ -698,6 +824,22 @@ def install_renewal_candidate(credentials, response, *, store_dir, credential_fi
         if _canonical_json(verified, _JOURNAL_LIMIT) != _canonical_json(journal, _JOURNAL_LIMIT):
             raise EnrollmentError("Installation journal readback mismatch")
         if not _same_bundle(current, candidate):
+            # Never remove a NEW accepted assertion on an installed retry.
+            # The exact predecessor receipt is already validated and durable;
+            # it retains reporting authority if the subsequent cutover fails.
+            if completed is not None:
+                _fsync(directory_fd)
+                proof = c._optional(directory_fd, c._COMPLETED, c._LIMIT)
+                if not c._equal(proof, completed, c._LIMIT):
+                    raise EnrollmentError("Predecessor completion changed")
+            old_accepted = c._optional(directory_fd, q._ACCEPTED, 8192)
+            if old_accepted is not None:
+                if completed is None:
+                    raise EnrollmentError("Unexpected previous accepted assertion")
+                c._accepted(old_accepted, current, _cycle_binding(current, path))
+                c._no_outbox(directory_fd)
+                _unlink(q._ACCEPTED, dir_fd=directory_fd)
+            _fsync(directory_fd)
             staged = _stage_install(parent_fd, candidate_data, stages)
             checked, _ = _read_private_json(parent_fd, staged, _BUNDLE_LIMIT)
             if _context(checked) != context or not _same_bundle(checked, candidate):

@@ -42,7 +42,9 @@ def enroll_fixture(tmp_path, monkeypatch):
         key = csr.public_key()
         if options.get("mismatch"):
             key = rsa.generate_private_key(public_exponent=65537, key_size=2048).public_key()
-        expiry = now + timedelta(days=-1 if options.get("expired") else 7)
+        expiry = now + timedelta(
+            days=-1 if options.get("expired") else options.get("lifetime_days", 7)
+        )
         signing_key = ca_key
         if options.get("bad_signature"):
             signing_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -57,7 +59,7 @@ def enroll_fixture(tmp_path, monkeypatch):
             .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)]))
             .issuer_name(name)
             .public_key(key)
-            .serial_number(2)
+            .serial_number(options.get("serial", 2))
             .not_valid_before(now - timedelta(days=2))
             .not_valid_after(expiry)
             .add_extension(
@@ -76,7 +78,7 @@ def enroll_fixture(tmp_path, monkeypatch):
             "device_id": DEVICE,
             "client_cert": cert.public_bytes(serialization.Encoding.PEM).decode(),
             "ca_cert": ca.public_bytes(serialization.Encoding.PEM).decode(),
-            "cert_serial": "2",
+            "cert_serial": format(options.get("serial", 2), "x"),
             "expires_at": expiry.isoformat(),
         }
         if options.get("bad_serial"):

@@ -140,9 +140,14 @@ def _authority(credentials, store_dir, credential_file):
             completed, _ = _read_private_json(directory, c._COMPLETED, c._LIMIT)
         except FileNotFoundError:
             completed = None
-        if completed is not None:
-            c._response(current)
-            c._validate(completed, current, context, binding)
+        state = r._read_pending(directory, context)
+        journal = c._optional(directory, "install.json", r._JOURNAL_LIMIT)
+        phase = r._cycle_phase(current, state, completed, journal, path)
+        if phase == "installed":
+            # The predecessor receipt must never supply accepted fallback for
+            # a new leaf, even though it authorizes this journal chain.
+            completed = None
+        elif completed is not None:
             c._remaining(
                 directory,
                 completed,
@@ -153,27 +158,10 @@ def _authority(credentials, store_dir, credential_file):
                 allow_successor_pending=True,
             )
         else:
-            state = r._read_pending(directory, context)
-            if state is None:
-                raise EnrollmentError("Missing pending request")
-            journal, _ = _read_private_json(directory, "install.json", r._JOURNAL_LIMIT)
-            previous = r._validate_install_journal(journal, context, state, path)
-            response = {
-                k: current[k]
-                for k in (
-                    "device_id",
-                    "client_cert",
-                    "ca_cert",
-                    "cert_serial",
-                    "expires_at",
-                    "fingerprint_sha256",
-                )
-            }
-            response.update(request_id=current["rotation_request_id"], state="issued")
-            candidate = r._build_renewal_candidate(previous, r._renewal_response(response), state)
-            if not r._same_bundle(candidate, current) or journal["candidate_sha256"] != digest:
-                raise EnrollmentError("Installed candidate authority mismatch")
-        yield directory, current, binding, completed
+            raise EnrollmentError("Missing installed report authority")
+        # This validated phase is observed under the same fixed lock as CSR
+        # preparation and queue publication. Never infer it from file presence.
+        yield directory, current, binding, completed, phase == "previous"
     finally:
         failed = False
         for fd in reversed(fds):
@@ -236,11 +224,13 @@ def queue_report(
     """Persist a public assertion from a future trusted current-client callback.
 
     A pending older boot assertion is retained until its exact acknowledgment.
+    A validated successor defers fresh OLD-leaf assertions, returning the latest
+    historical acceptance without creating an outbox or asserting this boot.
     This API cannot establish that a successful callback actually occurred.
     """
     try:
         with _authority(credentials, store_dir, credential_file) as authority:
-            directory, current, binding, completed = authority
+            directory, current, binding, completed, successor_pending = authority
             accepted_fallback = None if completed is None else completed["accepted_record"]
             proposed = _report(
                 {
@@ -260,7 +250,13 @@ def queue_report(
             if outbox is not None:
                 _fsync(directory)
                 return dict(outbox["report"])
-            if accepted is not None and accepted["report"]["boot_id"] == boot_id:
+            if accepted is not None and (
+                successor_pending or accepted["report"]["boot_id"] == boot_id
+            ):
+                # A successor may already be issued remotely even if its HTTPS
+                # response was lost. A fresh OLD-leaf outbox would then receive
+                # 409 forever and prevent cutover. Return historical acceptance,
+                # not a claim about this boot; preserve any existing outbox above.
                 _fsync(directory)
                 return dict(accepted["report"])
             value = dict(binding, report=proposed)
@@ -274,7 +270,7 @@ def load_report(credentials, *, store_dir, credential_file):
     """Read validated existing report state without creating or deleting entries."""
     try:
         with _authority(credentials, store_dir, credential_file) as authority:
-            directory, current, binding, completed = authority
+            directory, current, binding, completed, _ = authority
             accepted_fallback = None if completed is None else completed["accepted_record"]
             outbox, _ = _record(directory, _OUTBOX, current, binding)
             _record(directory, _ACCEPTED, current, binding, accepted_fallback=accepted_fallback)
@@ -296,7 +292,7 @@ def acknowledge_report(
     """
     try:
         with _authority(credentials, store_dir, credential_file) as authority:
-            directory, current, binding, completed = authority
+            directory, current, binding, completed, _ = authority
             accepted_fallback = None if completed is None else completed["accepted_record"]
             expected = _report(report, current)
             ack = _ack(response, expected)

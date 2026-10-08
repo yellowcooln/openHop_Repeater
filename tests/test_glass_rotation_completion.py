@@ -995,15 +995,53 @@ def test_real_certificate_expiry_without_clock_patch(
         assert state(case, "completed.json").exists()
     time.sleep(max(0, (deadline - datetime.now(timezone.utc)).total_seconds()) + 0.1)
     before = snapshot(case)
-    if expired == "old_completed":
-        assert load(case)["state"] == "rotation_completed"
-        assert snapshot(case) == before
-        complete(case)
-        assert state(case, "completed.json").read_bytes() == before["completed.json"]
-    else:
-        with pytest.raises(e.EnrollmentError):
-            complete(case)
-        assert snapshot(case) == before
-        if expired == "current_completed":
+    if expired == "current_completed":
+        guards = []
+        for call in (
+            lambda: complete(case, commit_guard=lambda: guards.append(1)),
+            lambda: load(case),
+        ):
             with pytest.raises(e.EnrollmentError):
-                load(case)
+                call()
+            assert snapshot(case) == before
+        assert not guards
+        return
+
+    # Only protected historical proof may outlive its certificate. CURRENT and
+    # its exact accepted report remain the authority for completing retirement.
+    assert datetime.now(timezone.utc) >= old_expiry
+    assert datetime.now(timezone.utc) < new_expiry
+    journal = json.loads(before["install.json"])
+    accepted_record = json.loads(before["report-accepted.json"])
+    expected = {
+        k: case[0]["rotation_request_id"] if k == "request_id" else case[0][k]
+        for k in api()._PUBLIC
+    } | {"state": "rotation_completed"}
+    if expired == "old_completed":
+        assert load(case) == expected
+    else:
+        assert load(case) is None
+    assert snapshot(case) == before
+    assert complete(case) == expected
+    receipt = state(case, "completed.json").read_bytes()
+    saved = json.loads(receipt)
+    assert set(saved) == api()._FIELDS
+    assert saved["install_journal"] == journal
+    assert saved["install_journal"]["previous_bundle"] == old
+    assert saved["install_journal"]["previous_sha256"] == r._bundle_digest(old)
+    assert saved["accepted_record"] == accepted_record
+    assert saved["accepted_record"]["ack"]["accepted"] is True
+    assert saved["candidate_sha256"] == r._bundle_digest(case[0])
+    assert saved["pending_sha256"] == api()._digest(json.loads(before["pending.json"]), r._LIMIT)
+    assert stat.S_IMODE(state(case, "completed.json").stat().st_mode) == 0o600
+    assert state(case, "completed.json").stat().st_uid == os.geteuid()
+    if expired == "old_completed":
+        assert receipt == before["completed.json"]
+    assert snapshot(case) == {
+        name: raw for name, raw in before.items() if name not in ("pending.json", "install.json")
+    } | {"completed.json": receipt}
+    frozen = snapshot(case)
+    assert load(case) == expected
+    assert snapshot(case) == frozen
+    assert complete(case) == expected
+    assert snapshot(case) == frozen

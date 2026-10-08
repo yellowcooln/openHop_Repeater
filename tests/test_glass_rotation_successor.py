@@ -141,11 +141,14 @@ def test_old_leaf_reports_and_outbox_retry_preserve_successor(accepted, missing_
     assert acknowledge(accepted, old)["accepted"] is True
     assert snapshot(accepted) == before
     new = queue(accepted, NEXT_BOOT)
+    assert new == old  # Historical acceptance, not a fresh boot assertion.
     assert new["request_id"] == accepted[0]["rotation_request_id"] != request["request_id"]
     assert new["cert_serial"] == accepted[0]["cert_serial"]
-    assert q.load_report(accepted[0], **args(accepted)) == new
+    assert new["boot_id"] != NEXT_BOOT
+    assert q.load_report(accepted[0], **args(accepted)) is None
+    assert snapshot(accepted) == before
     pending = state(accepted, "pending.json").read_bytes()
-    assert successor(accepted) == request  # Outbox blocks creation, not reuse.
+    assert successor(accepted) == request
     assert state(accepted, "pending.json").read_bytes() == pending
     for call in (c.complete_rotation, c.load_completed):
         with pytest.raises(e.EnrollmentError):

@@ -499,3 +499,63 @@ There is no new-cycle handler activation, transport filename passthrough,
 completed-receipt replacement, expired-CURRENT recovery, or broker proof here.
 Tests use isolated synthetic PKI; secure filesystem ancestry checks are not
 relaxed for writable test-cache ancestors.
+
+## Integrated node rotation cycles and consumption (Task5 source candidate)
+
+This section supersedes the historical inactivity/disabled-successor statements
+above. The existing pending v1/v2, install journal, completed receipt and public
+outbox/accepted formats are unchanged; no transition file is introduced.
+`rotation_state._cycle_phase` is shared pure authority under the existing fixed
+file lock. It distinguishes completed CURRENT, predecessor CURRENT with an exact
+receipt-linked successor, and installed replacement CURRENT backed by that
+predecessor's journal. The v2 marker must equal SHA256 of the exact canonical
+predecessor receipt; the receipt is validated against `previous_bundle`, not
+against the replacement. Installed authority reconstructs the candidate from the
+persisted pending key/CSR and strict CURRENT response and checks its journal SHA.
+
+ANY existing outbox blocks credential cutover. Old public acceptance is validated
+under the durable predecessor receipt, unlinked and directory-fsynced before
+replacement. If cutover fails, old-CURRENT reporting can still use that receipt's
+embedded acceptance. While a validated, receipt-linked successor is pending and
+OLD remains CURRENT, `queue_report` still validates the caller, callback and full
+pending/journal/completion chain but defers **fresh OLD-leaf boot reports**. With
+no outbox it returns the latest validated same-leaf accepted public report (real
+accepted file first, otherwise embedded receipt), without changing its boot ID or
+creating an outbox. This is historical acceptance, not a new-boot connection claim.
+The decision shares the fixed lock with CSR preparation. Existing durable outboxes
+are retained unchanged and still require their exact ACK; load/ACK semantics and
+OLD MQTT telemetry/inform readiness are unchanged. This prevents a lost NEW renewal
+response followed by a restarted OLD-leaf callback from queuing a report the server
+already rejects as stale, which would otherwise permanently block cutover.
+
+Installed retries never delete NEW acceptance or rewrite CURRENT. After cutover,
+OLD acceptance is never fallback authority for NEW: a successful NEW current-client
+callback, its durable NEW-leaf report and exact ACK are required. A new completion
+requires the valid installed chain, exact new-leaf
+accepted node assertion and no outbox, then atomically replaces the old receipt.
+Matched cleanup retries use the new receipt's saved pending digest and do not
+need the overwritten predecessor receipt. No generic stale-state repair occurs.
+
+Only private protected journal/receipt snapshots permit expiry during historical
+certificate validation; key match, identity, signature, metadata and pinned CA
+are still checked. CURRENT and replacement validity are always strict. An expired
+CURRENT fails closed and needs explicit reenrollment; historical material is
+never authentication or rollback authority, and no expired-current loader exists.
+
+Transport passes the trusted credential filename to preparation and reconciles
+already-installed journal phases without another renewal HTTP request. Handler
+maintenance reconciles exactly acknowledged partial retirement before deciding
+whether another NEW key/request is due, without deleting a valid successor.
+Report flush completes the cycle only after an actual current-client callback's
+persisted assertion has an exact acknowledgment. Existing owned executor draining,
+configuration snapshots, cancellation invalidation and under-file-lock fast
+commit guards remain; completion guards are trusted internal callbacks, not wire
+or configuration input. Later boots retain completed-current reporting authority.
+
+`tests/test_glass_rotation_cycles.py` covers synthetic issuer/actual-handler
+same-path client replacement, two fresh-key cycles, lost responses, outbox gating,
+predecessor tampering, crash retries and strict operational versus historical
+expiry. Its Paho/HTTPS seams are mocks, NOT broker/proxy proof. Secure-ancestry
+focused execution, independent review, final parent suites and actual isolated
+HTTPS/Mosquitto proof remain required. This source candidate does not itself
+complete Task5 and authorizes no live deployment, command or RF changes.

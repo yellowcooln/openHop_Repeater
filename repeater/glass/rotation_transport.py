@@ -1,4 +1,4 @@
-"""One-cycle verified HTTPS renewal with durable, node-owned CSR retries.
+"""Verified HTTPS renewal cycles with durable, node-owned CSR retries.
 
 Installation is not a broker connection, report, acknowledgment or retirement.
 """
@@ -55,7 +55,7 @@ def renew_credentials(
     """Return only the public bundle-installed receipt; retain pending on error."""
     try:
         current = load_credentials(credential_file, base_url=base_url, device_id=device_id)
-        payload = r.prepare_rotation(current, store_dir=store_dir)
+        payload = r.prepare_rotation(current, store_dir=store_dir, credential_file=credential_file)
         if current.get("rotation_request_id") == payload["request_id"]:
             response = {
                 field: current[field]
