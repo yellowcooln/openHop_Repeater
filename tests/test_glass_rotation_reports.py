@@ -729,6 +729,93 @@ def test_cleanup_error_releases_descriptors(installed, monkeypatch):
     assert queue(installed)["boot_id"] == BOOT
 
 
+@pytest.mark.parametrize("phase", ["new", "accepted_outbox", "receipt_only"])
+@pytest.mark.parametrize("reject", [False, True])
+def test_trusted_ack_commit_guard_once_before_any_mutation(installed, monkeypatch, phase, reject):
+    module = api()
+    report = queue(installed)
+    if phase == "receipt_only":
+        acknowledge(installed, report)
+    elif phase == "accepted_outbox":
+        # Crash-style retry: accepted is durable but outbox cleanup failed.
+        with monkeypatch.context() as patch:
+            patch.setattr(module, "_unlink", lambda *a, **k: (_ for _ in ()).throw(OSError()))
+            with pytest.raises(e.EnrollmentError):
+                acknowledge(installed, report)
+        assert state(installed, "report-accepted.json").exists()
+        assert state(installed, "report-outbox.json").exists()
+    before = snapshot(installed)
+    events = []
+    for name in ("_publish", "_fsync", "_unlink"):
+        original = getattr(module, name)
+
+        def tracked(*a, _name=name, _original=original, **k):
+            events.append(_name)
+            return _original(*a, **k)
+
+        monkeypatch.setattr(module, name, tracked)
+
+    def guard():
+        assert events == []  # guard precedes publication AND idempotent fsync
+        assert snapshot(installed) == before
+        events.append("guard")
+        if reject:
+            raise RuntimeError("secret-commit-guard-error")
+
+    if reject:
+        with pytest.raises(e.EnrollmentError) as error:
+            module.acknowledge_report(
+                installed[0], report, ack(report), **args(installed), commit_guard=guard
+            )
+        assert str(error.value) == "Unable to acknowledge durable public Glass certificate report"
+        assert error.value.__suppress_context__
+        assert events == ["guard"]
+        assert snapshot(installed) == before
+    else:
+        assert module.acknowledge_report(
+            installed[0], report, ack(report), **args(installed), commit_guard=guard
+        ) == ack(report)
+        assert events[0] == "guard" and events.count("guard") == 1
+        assert not state(installed, "report-outbox.json").exists()
+        assert json.loads(state(installed, "report-accepted.json").read_bytes())["report"] == report
+        assert ("_publish" in events) == (phase == "new")
+        assert ("_unlink" in events) == (phase != "receipt_only")
+
+
+@pytest.mark.parametrize("invalid", ["response", "report", "stale_boot", "missing", "authority"])
+def test_invalid_ack_never_reaches_commit_admission(installed, monkeypatch, invalid):
+    module = api()
+    report = queue(installed)
+    response = ack(report)
+    if invalid == "response":
+        response["accepted"] = False
+    elif invalid == "report":
+        report = dict(report, connected=False)
+    elif invalid == "stale_boot":
+        report = dict(report, boot_id=NEXT_BOOT)
+    elif invalid == "missing":
+        state(installed, "report-outbox.json").unlink()
+    else:
+        journal_path = state(installed, "install.json")
+        journal = json.loads(journal_path.read_bytes())
+        journal["candidate_sha256"] = "0" * 64
+        journal_path.write_text(json.dumps(journal))
+    before = snapshot(installed)
+    guards, mutations = [], []
+    for name in ("_publish", "_fsync", "_unlink"):
+        monkeypatch.setattr(module, name, lambda *a, **k: mutations.append(a))
+    with pytest.raises(e.EnrollmentError):
+        module.acknowledge_report(
+            installed[0],
+            report,
+            response,
+            **args(installed),
+            commit_guard=lambda: guards.append("admitted"),
+        )
+    assert not guards and not mutations
+    assert snapshot(installed) == before
+
+
 def test_report_api_exists():
     module = importlib.import_module("repeater.glass.rotation_reports")
     for name in ("queue_report", "load_report", "acknowledge_report"):

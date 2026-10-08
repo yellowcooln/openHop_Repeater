@@ -323,3 +323,66 @@ of real broker ownership or delivery. Pending CSR and installation journal are
 never retired here. Handler callback integration, report transport, explicit
 cycle retirement, reenrollment and real-broker renewal/revocation/ACL proof
 remain later gated work; this is not completion of the original Task5.
+
+## Current-client assertion producer and HTTPS delivery (Task5(c5b))
+
+This section supersedes the earlier report-inactivity statements for handler
+wiring and delivery only. The handler allocates one UUID4 boot ID per instance,
+stable across reconnects, reloads and stop/start of that instance. Its actual
+successful **current Paho client** callback records detached public namespace,
+token-generation hash and installed rotation leaf metadata under a thread mutex.
+The connecting immutable TLS material and effective runtime signature must match
+the current installed bundle. Initial enrollment without rotation metadata,
+failed/stale callbacks and readiness alone cannot produce a rotation report.
+Current disconnect, close, invalidation and credential/configuration cutover
+clear this ephemeral assertion; callbacks from replaced clients are ignored.
+Cleanup joins/disconnects run outside the mutex, and client/material/signature
+publication precedes loop startup so an immediate callback can bind safely.
+
+After successful authenticated inform maintenance, a separate sequential flush
+uses the same async rotation lock and an owned executor worker. Repeated
+cancellation immediately invalidates the publisher, drains the real worker
+without releasing that lock early, invalidates again after draining and propagates
+cancellation. Worker failures become safe data and emit only a fixed warning;
+ordinary report failure does not turn an accepted inform into a failed inform.
+
+The worker strictly reloads the current bundle and uses the unchanged c5a
+pending/journal/outbox authority. An existing older-boot outbox can be retransmitted
+without a current connection: it is a **historical callback assertion**, not
+real-time healthy status. A new assertion requires a current-client/readiness/
+metadata/configuration check under the mutex immediately before the queue
+decision; queue I/O occurs outside it. Disconnect after that decision does not
+retroactively erase truthful history. An older boot must be acknowledged first;
+a fresh current boot can be queued on the next poll.
+
+Only a persisted outbox is sent to the exact verified HTTPS origin plus
+`/device/certificates/report`: the six public fields, current operational bearer,
+configured timeout, existing `glass.ca_cert_path` trust and a 2048-byte request
+bound. Runtime namespace and the strictly loaded current bundle are rechecked
+before HTTP and before exact acknowledgment. Changed namespace/generation/leaf,
+lost responses and malformed/stale acknowledgments retain the outbox; possible
+remote acceptance is never described as rolled back. The full in-flight report
+is passed unchanged to c5a acknowledgment so an old response cannot clear another
+boot's report. An acknowledgment means only `node_reported`, never broker proof.
+
+Acknowledgment has a separate **ACK COMMIT ADMISSION** fence: the optional trusted
+internal `acknowledge_report(..., commit_guard=None)` guard runs exactly once under
+its durable file lock, after installed/pending/journal authority, the full expected
+report, response, and exact outbox/accepted-receipt checks, before the first durable
+mutation. This includes accepted-receipt-only retries and receipt-backed outbox
+cleanup, whose fsyncs also follow the guard. The handler supplies only its internal
+fast cancellation/runtime/configuration check under the MQTT mutex; filesystem,
+certificate validation and HTTP stay outside that mutex. Cancellation or namespace
+change while waiting for the durable lock or validation rejects admission without
+publishing acceptance, syncing receipts or deleting the outbox. Once admitted, the
+exact already-authorized historical acknowledgment may finish its durable
+transaction despite later cancellation/configuration changes. Cancellation still
+drains the worker, propagates and invalidates the publisher; it does not undo an
+accepted record or activate a candidate. No guard is passed through from user
+configuration or responses; the default preserves standalone c5a behavior.
+
+No pending/journal retirement, next renewal cycle, expired-credential recovery,
+issuing-CA/HTTPS trust change or command/capability/RF/UI change is added. Synthetic
+PKI plus mock Paho/HTTPS tests are not real broker/proxy evidence. Secure-ancestry
+full-suite, server contract and independent review gates plus real integration
+proof remain mandatory; this slice does not complete the original Task5.

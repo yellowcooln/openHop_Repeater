@@ -253,8 +253,17 @@ def load_report(credentials, *, store_dir, credential_file):
         raise EnrollmentError("Unable to load public Glass certificate report") from None
 
 
-def acknowledge_report(credentials, report, response, *, store_dir, credential_file):
-    """Durably accept exactly the in-flight saved report, then remove its outbox."""
+def acknowledge_report(
+    credentials, report, response, *, store_dir, credential_file, commit_guard=None
+):
+    """Durably accept exactly the in-flight saved report, then remove its outbox.
+
+    The optional trusted internal guard runs exactly once under the durable lock,
+    after full authority/report/response validation and before any mutation (even
+    an idempotent receipt fsync). Raising aborts without writes. Returning admits
+    this exact historical acknowledgment: later cancellation does not roll back
+    its transaction. Never accept a guard from user-controlled input.
+    """
     try:
         with _authority(credentials, store_dir, credential_file) as (directory, current, binding):
             expected = _report(report, current)
@@ -262,13 +271,19 @@ def acknowledge_report(credentials, report, response, *, store_dir, credential_f
             outbox, raw = _record(directory, _OUTBOX, current, binding)
             accepted, _ = _record(directory, _ACCEPTED, current, binding)
             receipt = dict(binding, report=expected, ack=ack)
+            reuse_accepted = accepted is not None and _same(accepted, receipt)
             if outbox is None:
-                if accepted is None or not _same(accepted, receipt):
+                if not reuse_accepted:
                     raise EnrollmentError("Missing exact report acknowledgment authority")
-            else:
-                if not _same(outbox["report"], expected):
-                    raise EnrollmentError("Stale in-flight report")
-                if accepted is None or not _same(accepted, receipt):
+            elif not _same(outbox["report"], expected):
+                raise EnrollmentError("Stale in-flight report")
+            # ACK COMMIT ADMISSION: all authority and exact-input checks precede
+            # this fence, including lock waits and crypto. Nothing durable has
+            # changed yet. Once admitted, finish this historical transaction.
+            if commit_guard is not None:
+                commit_guard()
+            if outbox is not None:
+                if not reuse_accepted:
                     _publish(directory, _ACCEPTED, dict(outbox, ack=ack), current, binding)
                 else:
                     _fsync(directory)
