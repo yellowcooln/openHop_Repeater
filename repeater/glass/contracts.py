@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field, fields
 from datetime import datetime, timedelta
+from hashlib import sha256
 from types import MappingProxyType
 from typing import Any
 from uuid import UUID
@@ -200,7 +201,11 @@ class Contract:
 
         def dump(value):
             if isinstance(value, Contract):
-                return {f.name: dump(getattr(value, f.name)) for f in fields(value)}
+                return {
+                    f.name: dump(getattr(value, f.name))
+                    for f in fields(value)
+                    if not (f.metadata.get("omit_none") and getattr(value, f.name) is None)
+                }
             if isinstance(value, Mapping):
                 return {k: dump(v) for k, v in value.items()}
             if type(value) in (tuple, list):
@@ -312,6 +317,9 @@ _REQUEST = {
     "expires_at": utc_value,
     "params": details,
     "expected_revision": nullable(text),
+    "lease_id": nullable(uuid_value),
+    "attempt": nullable(lambda v: integer(v, 1, 3)),
+    "lease_expires_at": nullable(utc_value),
 }
 
 
@@ -327,11 +335,22 @@ class RequestV2(Contract):
     expires_at: datetime
     params: dict[str, Any]
     expected_revision: str | None = field(default=None, kw_only=True)
+    lease_id: UUID | None = field(default=None, kw_only=True, metadata={"omit_none": True})
+    attempt: int | None = field(default=None, kw_only=True, metadata={"omit_none": True})
+    lease_expires_at: datetime | None = field(
+        default=None, kw_only=True, metadata={"omit_none": True}
+    )
 
     def _request(self, raw, validators):
         result = _validate_fields(raw, validators)
         if result["expires_at"] <= result["created_at"]:
             raise ValueError("expires_at must be after created_at")
+        lease = (result["lease_id"], result["attempt"], result["lease_expires_at"])
+        if any(v is not None for v in lease):
+            if any(v is None for v in lease):
+                raise ValueError("delivery lease fields must be present together")
+            if not result["created_at"] < result["lease_expires_at"] <= result["expires_at"]:
+                raise ValueError("delivery lease deadline outside request lifetime")
         if result["capability_version"] != ACTION_VERSIONS[result["action"]]:
             raise ValueError("incompatible action capability version")
         params = result["params"]
@@ -410,6 +429,8 @@ class ResultV2(Contract):
     message: str | None = None
     details: dict[str, Any] = field(default_factory=dict)
     completed_at: datetime | None = None
+    lease_id: UUID | None = field(default=None, metadata={"omit_none": True})
+    attempt: int | None = field(default=None, metadata={"omit_none": True})
 
     def _validate(self, raw):
         result = _validate_fields(
@@ -423,6 +444,8 @@ class ResultV2(Contract):
                 "execution_id": nullable(uuid_value),
                 "status": literal(
                     "accepted",
+                    "received",
+                    "awaiting_verification",
                     "running",
                     "succeeded",
                     "failed",
@@ -437,9 +460,13 @@ class ResultV2(Contract):
                 "message": nullable(lambda v: text(v, 0, 1024)),
                 "details": details,
                 "completed_at": nullable(utc_value),
+                "lease_id": nullable(uuid_value),
+                "attempt": nullable(lambda v: integer(v, 1, 3)),
             },
         )
         terminal = result["status"] in {"succeeded", "failed", "unsupported", "conflict"}
+        if (result["lease_id"] is None) != (result["attempt"] is None):
+            raise ValueError("result lease and attempt must be present together")
         completion = result["completed_at"]
         if terminal != (completion is not None):
             raise ValueError("terminal outcomes require completion; nonterminal outcomes forbid it")
@@ -465,11 +492,42 @@ class ResultV2(Contract):
 class ResultAcceptanceV2(Contract):
     request_id: UUID
     execution_id: UUID | None
+    acceptance_id: UUID | None = field(default=None, metadata={"omit_none": True})
+    result_sha256: str | None = field(default=None, metadata={"omit_none": True})
 
     def _validate(self, raw):
-        return _validate_fields(
-            raw, {"request_id": uuid_value, "execution_id": nullable(uuid_value)}
+        result = _validate_fields(
+            raw,
+            {
+                "request_id": uuid_value,
+                "execution_id": nullable(uuid_value),
+                "acceptance_id": nullable(uuid_value),
+                "result_sha256": nullable(digest_value),
+            },
         )
+        if (result["acceptance_id"] is None) != (result["result_sha256"] is None):
+            raise ValueError("acceptance ID and digest must be present together")
+        return result
+
+
+def digest_value(value):
+    if type(value) is not str or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise ValueError("invalid SHA256 digest")
+    return value
+
+
+def canonical_json(model):
+    return json.dumps(
+        model.model_dump(mode="json"),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+
+
+def result_sha256(result):
+    return sha256(canonical_json(result).encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -550,9 +608,14 @@ class ResponseV2(Contract):
     def check_inform(self, inform):
         if self.device_id != inform.device_id or self.boot_id != inform.boot_id:
             raise ValueError("response identity mismatch")
-        offered = {(r.request_id, r.execution_id) for r in inform.results}
+        offered = {(r.request_id, r.execution_id): r for r in inform.results}
         if any((r.request_id, r.execution_id) not in offered for r in self.accepted_results):
             raise ValueError("acceptance references an unoffered result")
+        for receipt in self.accepted_results:
+            if receipt.result_sha256 is not None and receipt.result_sha256 != result_sha256(
+                offered[(receipt.request_id, receipt.execution_id)]
+            ):
+                raise ValueError("acceptance digest does not match offered result")
         if self.sent_at < inform.sent_at:
             raise ValueError("response predates inform")
 
