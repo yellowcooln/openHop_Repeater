@@ -262,3 +262,129 @@ def prepare_rotation(credentials, *, store_dir):
             for fd in (lock_fd, directory_fd, store_fd):
                 if fd is not None:
                     os.close(fd)
+
+
+_RENEWAL_FIELDS = {
+    "device_id",
+    "request_id",
+    "client_cert",
+    "ca_cert",
+    "cert_serial",
+    "expires_at",
+    "fingerprint_sha256",
+    "state",
+}
+
+
+def _renewal_response(response):
+    from datetime import datetime
+
+    if not isinstance(response, dict) or set(response) != _RENEWAL_FIELDS:
+        raise EnrollmentError("Invalid renewal response fields")
+    value = dict(response)
+    if any(type(item) is not str for item in value.values()):
+        raise EnrollmentError("Invalid renewal response types")
+    # Bound individual scalars before serializing or parsing untrusted material.
+    if len(value["device_id"]) != 36 or len(value["request_id"]) != 36:
+        raise EnrollmentError("Invalid renewal identity")
+    if value["state"] != "issued":
+        raise EnrollmentError("Renewal certificate is not issued")
+    if not re.fullmatch(r"[0-9a-f]{1,40}", value["cert_serial"]) or not int(
+        value["cert_serial"], 16
+    ):
+        raise EnrollmentError("Invalid renewal serial")
+    if not re.fullmatch(r"[0-9a-f]{64}", value["fingerprint_sha256"]):
+        raise EnrollmentError("Invalid renewal fingerprint")
+    for field in ("client_cert", "ca_cert"):
+        if not 1 <= len(value[field]) <= 14000:
+            raise EnrollmentError("Invalid renewal certificate size")
+        value[field].encode("ascii")
+    if not 1 <= len(value["expires_at"]) <= 64:
+        raise EnrollmentError("Invalid renewal expiry size")
+    expiry = datetime.fromisoformat(value["expires_at"].replace("Z", "+00:00"))
+    if expiry.tzinfo is None or expiry.utcoffset() is None:
+        raise EnrollmentError("Renewal expiry must be timezone aware")
+    if len(json.dumps(value, separators=(",", ":")).encode("utf-8")) > 65536:
+        raise EnrollmentError("Renewal response too large")
+    return value
+
+
+def _single_certificate(pem):
+    from cryptography import x509
+    from cryptography.hazmat.primitives import serialization
+
+    raw = pem.encode("ascii")
+    certificate = x509.load_pem_x509_certificate(raw)
+    # PEM parsers can accept extra certificates, prefixes and trailing garbage.
+    if certificate.public_bytes(serialization.Encoding.PEM) != raw:
+        raise EnrollmentError("Invalid renewal certificate encoding")
+    return certificate
+
+
+def validate_renewal_candidate(credentials, response, *, store_dir):
+    """Return a secret-bearing replacement bundle, without installing it.
+
+    Only an existing private pending request under its existing fixed lock is
+    authoritative. No state creation, network, deletion, activation or writes;
+    the current enrollment must still be valid (no expired-current recovery).
+    The issuing CA is pinned by DER; returned CA material is never HTTPS trust.
+    """
+    store_fd = directory_fd = lock_fd = None
+    try:
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+
+        if not isinstance(credentials, dict):
+            raise EnrollmentError("Invalid enrollment bundle")
+        current = dict(credentials)
+        context = _context(current)
+        value = _renewal_response(response)
+        store_fd = m._open_directory(store_dir)
+        directory_fd = os.open("rotation-state", m._DIR_FLAGS, dir_fd=store_fd)
+        _check_private(directory_fd, directory=True)
+        lock_fd = os.open(".lock", os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
+        _check_private(lock_fd)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        _check_private(directory_fd, directory=True)
+        _check_private(lock_fd)
+        state = _read_pending(directory_fd, context)
+        if state is None:
+            raise EnrollmentError("Missing pending renewal request")
+        if any(value[field] != state[field] for field in ("device_id", "request_id")):
+            raise EnrollmentError("Renewal pending identity mismatch")
+        leaf = _single_certificate(value["client_cert"])
+        ca = _single_certificate(value["ca_cert"])
+        pinned_ca = x509.load_pem_x509_certificate(current["ca_cert"].encode("ascii"))
+        if ca.public_bytes(serialization.Encoding.DER) != pinned_ca.public_bytes(
+            serialization.Encoding.DER
+        ):
+            raise EnrollmentError("Renewal issuing CA mismatch")
+        candidate = {
+            "base_url": current["base_url"],
+            "device_id": current["device_id"],
+            "pubkey": current["pubkey"],
+            "operational_token": current["operational_token"],
+            "private_key": state["private_key"],
+            "client_cert": value["client_cert"],
+            "ca_cert": value["ca_cert"],
+            "cert_serial": value["cert_serial"],
+            "expires_at": value["expires_at"],
+            "rotation_request_id": state["request_id"],
+            "fingerprint_sha256": value["fingerprint_sha256"],
+        }
+        _validate_certificate(candidate)
+        if leaf.fingerprint(hashes.SHA256()).hex() != value["fingerprint_sha256"]:
+            raise EnrollmentError("Renewal leaf fingerprint mismatch")
+        return candidate
+    except Exception:  # noqa: BLE001 - never expose credential-bearing library errors
+        raise EnrollmentError("Unable to validate private Glass renewal candidate") from None
+    finally:
+        cleanup_failed = False
+        for fd in (lock_fd, directory_fd, store_fd):
+            if fd is not None:
+                try:
+                    os.close(fd)  # Closing the fixed lock releases flock.
+                except Exception:  # noqa: BLE001 - still close the other descriptors
+                    cleanup_failed = True
+        if cleanup_failed:
+            raise EnrollmentError("Unable to clean private Glass renewal validation") from None

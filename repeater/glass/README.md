@@ -141,3 +141,43 @@ not live producer output. `tests/test_glass_contracts.py` mirrors canonical
 runtime tests, replacing Pydantic-specific exception expectations with stdlib
 errors and omitting JSON Schema assertions. Handler tests retain real legacy
 builder diagnostics and assert eligibility never changes live v1 emission.
+
+## Inactive offline renewal candidate validation (Task5(c2) only)
+
+`rotation_state.validate_renewal_candidate(credentials, response, *, store_dir)`
+returns an **internal, secret-bearing replacement enrollment bundle**, not a
+public response or installation acknowledgement. Never log or expose it.
+The helper is not called by the handler and performs no HTTP/MQTT operations,
+credential installation, configuration changes or activation.
+
+The current enrollment is revalidated first, including current certificate
+validity: expired-current recovery remains unsupported. The helper opens only
+an **existing** private `rotation-state`, fixed `.lock` and `pending.json` using
+c1's ancestry, ownership, ACL, no-follow and exclusive-flock policy. Missing or
+invalid state fails without generating a request/key, creating directories or
+files, repairing permissions, deleting pending state or writing credential data.
+All opened descriptors (including the lock) are closed on success or failure.
+
+The response must contain exactly `device_id`, `request_id`, `client_cert`,
+`ca_cert`, `cert_serial`, `expires_at`, `fingerprint_sha256` and `state`, all
+strict strings. Device and request must match validated persisted pending state;
+state must be `issued`. Serial is positive lowercase hex (at most 40 characters),
+fingerprint is 64 lowercase hex characters, each PEM is ASCII and at most 14000
+characters, expiry is a timezone-aware ISO timestamp of at most 64 characters,
+and compact JSON is bounded to 65536 bytes. Leaf and CA must each be a single
+canonical PEM certificate; tolerated prefixes, suffixes and chains are rejected.
+Returned CA DER must match the current pinned issuing CA DER exactly: CA rotation
+and HTTPS trust provisioning are not supported here.
+
+The explicitly constructed candidate preserves `base_url`, `device_id`,
+`pubkey` and the existing HTTP `operational_token`, uses the **persisted pending
+private key** (never the old enrollment key), and carries the issued certificates,
+serial, expiry, `rotation_request_id` and `fingerprint_sha256`. Enrollment's
+certificate validation checks identity, signature, validity, client usage, key
+match and serial/expiry metadata; the leaf DER SHA256 fingerprint must also match
+the response. Failures raise sanitized `EnrollmentError` without secret detail.
+
+Returning a candidate is **not installation or Task5 completion**. Pending state
+and the current credential file remain unchanged. Atomic installation, completed
+request retirement, MQTT reconnect/report lifecycle and real-broker renewal,
+revocation and ownership proof remain separate gated slices.
