@@ -386,3 +386,56 @@ issuing-CA/HTTPS trust change or command/capability/RF/UI change is added. Synth
 PKI plus mock Paho/HTTPS tests are not real broker/proxy evidence. Secure-ancestry
 full-suite, server contract and independent review gates plus real integration
 proof remain mandatory; this slice does not complete the original Task5.
+
+## Inactive durable completion and matched retirement (Task5(c6a))
+
+`rotation_completion.complete_rotation(credentials, *, store_dir,
+credential_file, commit_guard=None)` and `load_completed(credentials, *,
+store_dir, credential_file)` are trusted internal **offline** APIs. They have
+no handler callsites, network calls, provisioning, activation, rollback, next
+renewal cycle or expired-current recovery. **c6b post-retirement report authority,
+new-cycle handling and handler integration must follow before activation**:
+current c5a/c5b authority still requires pending state and the install journal.
+
+Under the existing fixed private exclusive lock, completion validates the full
+current credential file against the caller, ordinary current certificate
+validity and strict leaf metadata, cryptographic pending key/CSR, reconstructed
+c2 candidate, c3 journal and c5a literal accepted `node_reported` assertion.
+Any report outbox, including accepted-but-not-cleaned crash state, prevents
+retirement. Current bytes are reread before admission and publication. The
+optional trusted guard runs once after validation before any durable mutation;
+returning admits that exact historical transaction, not activation permission.
+
+The immutable private mode-0600 `completed.json` is at most 131072 bytes and
+contains exactly version 1, origin/device/token-generation/path/request/leaf
+bindings, canonical current and pending digests, the exact install journal and
+accepted public record. It retains **one secret last-good previous bundle** in
+the embedded journal, never a second pending key/CSR or unbounded history.
+Never expose or log this secret-bearing receipt. Previous/current bundles are
+bounded to 65536 bytes, the journal to 131072 and accepted record to 8192.
+
+Exclusive private staging, checked write/flush/fsync, full bounded validated
+readback, atomic publication, directory fsync and validated readback precede
+matched pending unlink/fsync and matched journal unlink/fsync. Prepublication
+failure preserves original authority bytes and cleans only owned staging;
+postpublication/unlink failure raises without rollback. Retries validate and
+reuse the same completion bytes, allowing missing retired files only under the
+valid completion. Foreign/unsafe remaining state fails without deletion.
+Current credentials, accepted report, fixed lock, immutable MQTT directories
+and unrelated stages are never removed. `load_completed` is read-only even
+in partially retired crash states; missing completion returns `None` only
+after validating existing current-file/store/lock authority.
+
+A retained previous certificate may expire **after** valid completion creation:
+the bounded historical journal, previous digest, preserved context, strict
+scalar syntax and same canonical pinned CA remain checked, but the backup is
+not operational authentication or rollback authority. Current certificate
+validity is never relaxed. Missing accepted-file retries use the embedded
+receipt; a newer valid same-leaf boot receipt does not rewrite completion.
+
+Public output contains only `device_id`, `request_id`, `cert_serial`,
+`fingerprint_sha256`, `expires_at` and `state: "rotation_completed"`. It means
+accepted node assertion plus local matched key/journal retirement, **not**
+broker verification, revocation, real-broker ownership, Task5 completion or
+permission to activate this core. Secure-ancestry synthetic tests and parent
+full-suite/spec/independent-review gates remain mandatory.
