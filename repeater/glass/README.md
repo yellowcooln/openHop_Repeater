@@ -181,3 +181,52 @@ Returning a candidate is **not installation or Task5 completion**. Pending state
 and the current credential file remain unchanged. Atomic installation, completed
 request retirement, MQTT reconnect/report lifecycle and real-broker renewal,
 revocation and ownership proof remain separate gated slices.
+
+## Inactive offline atomic bundle installation (Task5(c3) only)
+
+`rotation_state.install_renewal_candidate(credentials, response, *, store_dir,
+credential_file)` is a trusted **internal offline** API, not a handler or HTTP
+file-write endpoint. The explicit filename must be absolute, without parent
+traversal or symlink ancestry, under an existing safe provisioned directory.
+The existing target must be runtime-owned, regular, ACL-free and mode 0600;
+missing, corrupt, oversized or unsafe files fail without creation or repair.
+Rotation-state filenames and its directory are not valid credential targets.
+
+The existing fixed rotation lock covers pending state, journal/current reads,
+candidate certificate validation, replacement and final readback. The pure c2
+candidate builder is shared without nested flock acquisition. Current enrollment
+validity remains required; expired-current recovery and issuing-CA rotation are
+not enabled. No HTTPS trust settings or immutable MQTT TLS directories change.
+
+Before changing the bundle, the helper durably publishes one private
+`rotation-state/install.json` journal, bounded to 131072 bytes. It contains
+exactly version 1, origin/device/token-generation binding, request ID, the exact
+absolute lexical credential filename, the last-good `previous_bundle`, and
+`previous_sha256`/`candidate_sha256`. Both bundles are bounded to 65536 canonical
+JSON bytes; digests use SHA256 of compact UTF-8 JSON with sorted keys. Candidate
+secrets are derived from pending state plus the response, not duplicated in the
+journal. **The journal is secret-bearing backup material: never expose or log it.**
+Existing journal bytes are validated and reused, never repaired or replaced.
+A different request, generation, path, candidate or foreign current file fails
+closed. The journal and pending CSR remain intact for explicit future retirement
+and recovery; this bounds one uncertain rotation, not multiple renewal cycles.
+
+The candidate is staged privately beside the existing credential file,
+flushed/fsynced, privately read back and cryptographically validated before
+atomic dirfd replacement. An immediate reread checks the current file has not
+changed since the initial snapshot; this is a cooperating-writer guard, not an
+administrator cross-process merge guarantee. The parent is fsynced and the
+installed bundle validated again before success. Pre-replace failures preserve
+old credential bytes and clean only this call's staging files. Postpublication
+or post-replace failures return sanitized errors **without pretending rollback**.
+Retries accept only the validated original or exact candidate caller/current
+bundle, preserve journal/pending bytes, fsync uncertain directories, and do not
+rewrite an already installed candidate. Descriptors and the lock are released
+also when cleanup fails.
+
+The public receipt contains only `device_id`, `request_id`, `cert_serial`,
+`fingerprint_sha256`, `expires_at`, and `state: "bundle_installed"`. This means
+**offline bundle installation/readback**, not MQTT materialization, successful
+connection callback, server installation acknowledgment, delivery or broker
+proof. There are no handler calls, network operations, activation, reporting or
+pending/journal retirement in this slice; those remain separate gated work.
