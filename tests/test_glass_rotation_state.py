@@ -254,8 +254,10 @@ def test_io_failure_cleanup_and_published_retry(bundle, tmp_path, monkeypatch, s
 
         if stage == "write":
 
-            def partial(fd, name, data):
+            def partial(fd, name, data, *, on_create=None):
                 target = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=fd)
+                if on_create is not None:
+                    on_create()
                 os.write(target, data[:20])
                 os.close(target)
                 fail()

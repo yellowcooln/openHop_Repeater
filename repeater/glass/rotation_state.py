@@ -32,6 +32,7 @@ _FIELDS = {
     "private_key",
     "csr_pem",
 }
+_V2_FIELDS = _FIELDS | {"previous_completed_sha256"}
 _fsync = os.fsync
 _replace = os.replace
 
@@ -71,12 +72,20 @@ def _validate_pending(value, context):
     from cryptography.hazmat.primitives.asymmetric import rsa
     from cryptography.x509.oid import NameOID
 
-    if not isinstance(value, dict) or set(value) != _FIELDS:
+    if not isinstance(value, dict):
         raise EnrollmentError("Invalid pending CSR fields")
-    if type(value["version"]) is not int or value["version"] != 1:
+    if type(value.get("version")) is not int or value["version"] not in (1, 2):
         raise EnrollmentError("Invalid pending CSR version")
-    if any(type(value[field]) is not str for field in _FIELDS - {"version"}):
+    fields = _FIELDS if value["version"] == 1 else _V2_FIELDS
+    if set(value) != fields:
+        raise EnrollmentError("Invalid pending CSR fields")
+    if any(type(value[field]) is not str for field in fields - {"version"}):
         raise EnrollmentError("Invalid pending CSR types")
+    if value["version"] == 2 and not re.fullmatch(
+        "[0-9a-f]{64}", value["previous_completed_sha256"]
+    ):
+        raise EnrollmentError("Invalid pending completion marker")
+    _canonical_json(value, _LIMIT)
     if not re.fullmatch("[0-9a-f]{64}", value["generation_sha256"]):
         raise EnrollmentError("Invalid pending generation")
     if any(value[field] != context[field] for field in context):
@@ -149,7 +158,7 @@ def _read_pending(directory_fd, context):
     return _validate_pending(json.loads(data, object_pairs_hook=_unique_pairs), context)
 
 
-def _new_pending(context):
+def _new_pending(context, *, previous_completed_sha256=None):
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import rsa
@@ -163,9 +172,9 @@ def _new_pending(context):
         )
         .sign(key, hashes.SHA256())
     )
-    return dict(
+    value = dict(
         context,
-        version=1,
+        version=1 if previous_completed_sha256 is None else 2,
         request_id=str(uuid.uuid4()),
         private_key=key.private_bytes(
             serialization.Encoding.PEM,
@@ -174,6 +183,88 @@ def _new_pending(context):
         ).decode("ascii"),
         csr_pem=csr.public_bytes(serialization.Encoding.PEM).decode("ascii"),
     )
+    if previous_completed_sha256 is not None:
+        value["previous_completed_sha256"] = previous_completed_sha256
+    return value
+
+
+def _validate_successor_pending(state, current, completed, context, binding):
+    """Pure receipt-linked next-key authority; never filesystem or lock access."""
+    from cryptography.hazmat.primitives import serialization
+
+    from repeater.glass import rotation_completion as c
+
+    if _context(current) != context:
+        raise EnrollmentError("Successor current context mismatch")
+    c._response(current)
+    if binding != {
+        "version": 1,
+        "base_url": context["base_url"],
+        "generation_sha256": context["generation_sha256"],
+        "credential_file": completed["credential_file"],
+        "candidate_sha256": _bundle_digest(current),
+    }:
+        raise EnrollmentError("Successor current binding mismatch")
+    c._validate(completed, current, context, binding)
+    _validate_pending(state, context)
+    if state["version"] != 2 or state["previous_completed_sha256"] != c._digest(
+        completed, c._LIMIT
+    ):
+        raise EnrollmentError("Successor completion marker mismatch")
+    request = uuid.UUID(state["request_id"])
+    if request.version != 4 or state["request_id"] == current["rotation_request_id"]:
+        raise EnrollmentError("Successor request is not new")
+    key = serialization.load_pem_private_key(state["private_key"].encode("ascii"), password=None)
+    leaf = _single_certificate(current["client_cert"])
+
+    def public_bytes(public):
+        return public.public_bytes(
+            serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+
+    if public_bytes(key.public_key()) == public_bytes(leaf.public_key()):
+        raise EnrollmentError("Successor key is not new")
+    return state
+
+
+def _successor_authority(directory, credentials, context, completed, credential_file):
+    """Validate existing current filename under the caller's already-held lock."""
+    from repeater.glass import rotation_completion as c
+    from repeater.glass import rotation_reports as q
+
+    path = os.fspath(credential_file)
+    if type(path) is not str or not os.path.isabs(path) or ".." in path.split("/"):
+        raise EnrollmentError("Invalid successor credential filename")
+    parent, name = os.path.split(path)
+    if (
+        not name
+        or name in {".lock", "pending.json", "install.json", c._COMPLETED, q._OUTBOX, q._ACCEPTED}
+        or name.startswith(".stage-")
+    ):
+        raise EnrollmentError("Reserved successor credential filename")
+    parent_fd = m._open_directory(parent)
+    try:
+        a, b = os.fstat(parent_fd), os.fstat(directory)
+        if (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino):
+            raise EnrollmentError("Credential target cannot be rotation state")
+        current, _ = _read_private_json(parent_fd, name, _BUNDLE_LIMIT)
+        if _context(current) != context or not _same_bundle(current, credentials):
+            raise EnrollmentError("Successor current credential mismatch")
+        c._response(current)
+        binding = {
+            "version": 1,
+            "base_url": context["base_url"],
+            "generation_sha256": context["generation_sha256"],
+            "credential_file": path,
+            "candidate_sha256": _bundle_digest(current),
+        }
+        c._validate(completed, current, context, binding)
+        accepted = c._optional(directory, q._ACCEPTED, 8192)
+        if accepted is not None:
+            c._accepted(accepted, current, binding)
+        return current, binding
+    finally:
+        os.close(parent_fd)
 
 
 def _write_staged(directory_fd, name, data, *, on_create=None):
@@ -197,7 +288,7 @@ def _write_staged(directory_fd, name, data, *, on_create=None):
         _fsync(stream.fileno())
 
 
-def prepare_rotation(credentials, *, store_dir):
+def prepare_rotation(credentials, *, store_dir, credential_file=None, commit_guard=None):
     """Return only device_id/request_id/csr_pem after durable private readback.
 
     The provisioned store must exist with mqtt_credentials' strict ancestry.
@@ -206,7 +297,7 @@ def prepare_rotation(credentials, *, store_dir):
     No network, credential installation, report, handler or MQTT activation.
     """
     store_fd = directory_fd = lock_fd = None
-    staged = None
+    stages = []
     try:
         context = _context(credentials)
         store_fd = m._open_directory(store_dir)
@@ -238,16 +329,48 @@ def prepare_rotation(credentials, *, store_dir):
         _check_private(lock_fd)
         _fsync(lock_fd)
         _fsync(store_fd)
+        from repeater.glass import rotation_completion as c
+
         state = _read_pending(directory_fd, context)
+        completed = c._optional(directory_fd, c._COMPLETED, c._LIMIT)
+        # Presence (including unsafe entries) gates new/successor preparation,
+        # not reuse of a validated v1 request before completion. The installer
+        # still validates that journal when reconciling an installed retry.
+        try:
+            os.stat("install.json", dir_fd=directory_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            journal_present = False
+        else:
+            journal_present = True
+        if journal_present and (completed is not None or state is None or state["version"] == 2):
+            raise EnrollmentError("Prior rotation retirement incomplete")
+        marker = None
+        if completed is not None:
+            current, binding = _successor_authority(
+                directory_fd, credentials, context, completed, credential_file
+            )
+            marker = c._digest(completed, c._LIMIT)
+            if state is not None:
+                _validate_successor_pending(state, current, completed, context, binding)
+            else:
+                c._no_outbox(directory_fd)
+        elif state is not None and state["version"] == 2:
+            raise EnrollmentError("Missing successor completion authority")
         if state is None:
-            state = _validate_pending(_new_pending(context), context)
+            state = _validate_pending(
+                _new_pending(context, previous_completed_sha256=marker), context
+            )
+            if completed is not None:
+                _validate_successor_pending(state, current, completed, context, binding)
             data = json.dumps(state, separators=(",", ":")).encode("utf-8")
             if len(data) > _LIMIT:
                 raise EnrollmentError("Pending CSR too large")
+            if commit_guard is not None:
+                commit_guard()  # Trusted request admission, not provisioning admission.
             staged = ".stage-" + secrets.token_hex(16)
-            _write_staged(directory_fd, staged, data)
+            _write_staged(directory_fd, staged, data, on_create=lambda: stages.append(staged))
             _replace(staged, "pending.json", src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
-            staged = None  # Never fake rollback after publication.
+            stages.remove(staged)  # Never fake rollback after publication.
             _fsync(directory_fd)
             verified = _read_pending(directory_fd, context)
             if verified != state:
@@ -258,13 +381,15 @@ def prepare_rotation(credentials, *, store_dir):
         else:
             # A retry after a post-replace fsync failure must reuse and make the
             # published entry durable, not generate another key.
+            if commit_guard is not None:
+                commit_guard()
             _fsync(directory_fd)
         return {field: state[field] for field in ("device_id", "request_id", "csr_pem")}
     except Exception:  # noqa: BLE001 - never expose credential-bearing library errors
         raise EnrollmentError("Unable to prepare durable private Glass rotation request") from None
     finally:
         try:
-            if staged is not None and directory_fd is not None:
+            for staged in stages:
                 try:
                     os.unlink(staged, dir_fd=directory_fd)
                 except FileNotFoundError:
@@ -524,6 +649,8 @@ def install_renewal_candidate(credentials, response, *, store_dir, credential_fi
         state = _read_pending(directory_fd, context)
         if state is None:
             raise EnrollmentError("Missing pending renewal request")
+        if state["version"] == 2:
+            raise EnrollmentError("Successor installation is not enabled")
         parent_fd = m._open_directory(parent)
         parent_info, state_info = os.fstat(parent_fd), os.fstat(directory_fd)
         if (parent_info.st_dev, parent_info.st_ino) == (state_info.st_dev, state_info.st_ino):

@@ -143,7 +143,15 @@ def _authority(credentials, store_dir, credential_file):
         if completed is not None:
             c._response(current)
             c._validate(completed, current, context, binding)
-            c._remaining(directory, completed, current, context, binding, allow_outbox=True)
+            c._remaining(
+                directory,
+                completed,
+                current,
+                context,
+                binding,
+                allow_outbox=True,
+                allow_successor_pending=True,
+            )
         else:
             state = r._read_pending(directory, context)
             if state is None:

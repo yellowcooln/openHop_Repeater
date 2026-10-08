@@ -472,3 +472,30 @@ Public APIs and wire/configuration formats are unchanged. No handler retirement
 callsite, new-cycle transition, expired-CURRENT loader, broker proof or activation
 is introduced. New-cycle/consumer gates must precede any c6a activation; the
 original Task5 remains incomplete.
+
+## Offline Glass successor preparation (c6b2a)
+
+The internal `prepare_rotation` API can prepare a next CSR only after the
+installed CURRENT leaf has a fully validated `completed.json` receipt and the
+prior pending request and installation journal have been retired. It requires
+the trusted absolute `credential_file`, exact canonical caller/current equality,
+and ordinary unexpired CURRENT credentials. The private version-2 pending file
+atomically retains the new RSA key, new request UUID, CSR, and canonical completed
+receipt SHA256 marker. Its public return remains only `device_id`, `request_id`,
+and `csr_pem`. Initial preparation without a completed receipt retains version 1.
+
+An outstanding report outbox blocks **new generation**, but a validated existing
+successor is reused byte-for-byte even while an old-CURRENT report is queued.
+Completed-current report authority continues to report and acknowledge the OLD
+installed leaf, never the successor CSR. Completion/load APIs refuse a successor
+rather than deleting its private key. A trusted internal `commit_guard` admits
+request publication or retry exactly once after authority validation; directory
+and lock provisioning fsyncs can precede admission for legacy compatibility.
+
+**Successor installation is explicitly disabled:** `install_renewal_candidate`
+rejects version-2 pending state before opening the credential parent or staging
+any journal/bundle. Offline candidate validation is not cutover permission.
+There is no new-cycle handler activation, transport filename passthrough,
+completed-receipt replacement, expired-CURRENT recovery, or broker proof here.
+Tests use isolated synthetic PKI; secure filesystem ancestry checks are not
+relaxed for writable test-cache ancestors.

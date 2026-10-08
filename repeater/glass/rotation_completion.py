@@ -250,20 +250,28 @@ def _validate(value, current, context, binding):
     return value
 
 
-def _remaining(directory, value, current, context, binding, allow_outbox=False):
-    # Report consumers validate the active outbox themselves under this same
-    # lock. Completion callers retain the default unconditional refusal.
+def _remaining(
+    directory, value, current, context, binding, allow_outbox=False, allow_successor_pending=False
+):
+    # Only validated completed-current report callers may admit a linked next
+    # request. Completion's default must never retire the next private key.
     if not allow_outbox:
         _no_outbox(directory)
     pending = r._read_pending(directory, context)
-    if pending is not None and (
-        pending["request_id"] != value["request_id"]
-        or pending["private_key"] != current["private_key"]
+    successor = pending is not None and pending["request_id"] != value["request_id"]
+    if successor:
+        if not allow_successor_pending:
+            raise EnrollmentError("Foreign remaining pending request")
+        r._validate_successor_pending(pending, current, value, context, binding)
+    elif pending is not None and (
+        pending["private_key"] != current["private_key"]
         or _digest(pending, r._LIMIT) != value["pending_sha256"]
     ):
         raise EnrollmentError("Foreign remaining pending request")
     journal = _optional(directory, "install.json", r._JOURNAL_LIMIT)
-    if journal is not None and not _equal(journal, value["install_journal"], r._JOURNAL_LIMIT):
+    if journal is not None and (
+        successor or not _equal(journal, value["install_journal"], r._JOURNAL_LIMIT)
+    ):
         raise EnrollmentError("Foreign remaining installation journal")
     accepted = _optional(directory, q._ACCEPTED, 8192)
     if accepted is not None:
