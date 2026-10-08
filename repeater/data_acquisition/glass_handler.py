@@ -132,6 +132,21 @@ class GlassHandler:
         self.request_timeout_seconds = max(3, int(glass_cfg.get("request_timeout_seconds", 10)))
         self.verify_tls = bool(glass_cfg.get("verify_tls", True))
         self.api_token = str(glass_cfg.get("api_token", "") or "").strip()
+        self.operational_credential_file = glass_cfg.get("operational_credential_file")
+        self._operational_credentials = None
+        if self.operational_credential_file:
+            from repeater.glass.enrollment import load_credentials, validate_https_url
+
+            validate_https_url(self.base_url)
+            if glass_cfg.get("verify_tls", True) is not True:
+                raise ValueError("Operational Glass credentials require verified HTTPS")
+            self._operational_credentials = load_credentials(
+                self.operational_credential_file,
+                base_url=self.base_url,
+                device_id=glass_cfg.get("device_id"),
+            )
+            self.api_token = self._operational_credentials["operational_token"]
+            self._cert_expires_at = self._operational_credentials["expires_at"]
         self.inform_interval_seconds = self._clamp_interval(
             int(glass_cfg.get("inform_interval_seconds", self.inform_interval_seconds))
         )
@@ -480,6 +495,22 @@ class GlassHandler:
         # No v2 delivery until an authenticated v2 route exists (Tasks4/6).
         if type(payload.get("version")) is not int or payload["version"] != 1:
             raise ValueError("Current Glass /inform transport supports protocol1 only")
+        if self.operational_credential_file:
+            # Re-read before every authenticated send; never fall back on failure.
+            self._reload_runtime_settings()
+            from repeater.glass.enrollment import post_verified_json
+
+            credentials = self._operational_credentials
+            if payload.get("pubkey") != credentials["pubkey"]:
+                raise ValueError("Operational Glass public identity mismatch")
+            payload = dict(payload, device_id=credentials["device_id"])
+            return post_verified_json(
+                f"{self.base_url}/inform", payload,
+                token=credentials["operational_token"],
+                timeout=self.request_timeout_seconds,
+                https_ca_file=self.ca_cert_path,
+                max_request=262144,
+            )
         url = f"{self.base_url}/inform"
         self._validate_http_url(url)
         headers = {"Content-Type": "application/json"}
@@ -1064,6 +1095,8 @@ class GlassHandler:
                 raise ValueError(f"Unsupported rule action at index {idx}: {action}")
 
     def _apply_cert_renewal(self, response: Dict[str, Any]) -> Tuple[bool, str]:
+        if self.operational_credential_file:
+            return False, "Node-owned credentials require CSR renewal; legacy renewal is unavailable"
         client_cert = response.get("client_cert")
         client_key = response.get("client_key")
         ca_cert = response.get("ca_cert")

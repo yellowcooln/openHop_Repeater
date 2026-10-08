@@ -37,6 +37,7 @@ dependencies = [
     "psutil>=5.9.0",
     "pyserial>=3.5",
     "pyjwt>=2.8.0",
+    "cryptography>=42.0.0",
     "ws4py>=0.6.0",
 ]
 
