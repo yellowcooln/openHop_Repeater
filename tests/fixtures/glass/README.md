@@ -40,15 +40,25 @@ Copies in Glass `backend/tests/fixtures/repeater` and Repeater
 - `unsupported_command.json` and `legacy_result.json`: v1 command and failed
   result for an unknown action. Backend tests use actual command/result models;
   producer tests exercise dispatch, queue and the next inform payload.
-- `proposed_v2_inform.json`, `proposed_v2_result.json`: **PROPOSED, PENDING TASK3**,
-  not captured current output and not implemented schemas. Reuse source-derived
-  fields with candidate additions: version=2, per-radio id/settings, explicit
-  unsupported status/error code. Names/layout may change when Task3 agrees its
-  contract. Current v1 tests require rejection, not a pretend v2 parser. No
-  capabilities negotiation or per-radio runtime statistics are verified here.
+- `proposed_v2_inform.json`, `proposed_v2_result.json`, `proposed_v2_query.json`,
+  `proposed_v2_job.json`, `proposed_v2_response.json`: historical filenames retained,
+  but contents replaced by canonical **Task3 protocol2** envelopes validated by
+  `backend/app/contracts/v2` and `test_protocol_v2.py`. They are synthetic examples,
+  not current live producer output; protocol2 transport and control are inactive.
+  The inform advertises read capabilities only and stable node-managed inventory
+  IDs, including explicit repeater/room/companion identity IDs. Builtin sensors
+  declare sensor_type independently of runtime plugins; plugin_id is null and
+  plugins is empty. Disabled radio observations remain null. The modelled set_mode job is not
+  dispatched; the unsupported result explicitly reports no mutation. The response
+  accepts that result's IDs only when it is offered in an inform batch. Current
+  v1 tests still require rejection. See `docs/revamp/protocol-v2.md` for exact
+  bounds, timestamp/identity correlation, params and idempotency semantics.
 
 Baseline backend tests validate actual Pydantic contracts and negative mutations;
-Repeater tests compare actual builder/command behavior against these examples.
-They do not start services or open radio hardware. Task3 must add real v2 schema,
-negotiation, null-radio/per-radio support and typed result parsing before claiming
-acceptance of the proposed examples.
+Repeater tests compare actual builder/command behavior against legacy examples.
+Task3 tests add offline v2 parsing/negotiation and safe legacy observation adapters;
+no services or radio hardware are started. The parent owns copying the replacement
+v2 fixtures to Repeater and verifying cross-repository parity before publication.
+The byte-identical claim above describes the Task2 baseline, not an unverified
+Task3 mirror. No enrollment, persistence, live dispatch or security repair is
+claimed by accepting these offline examples.

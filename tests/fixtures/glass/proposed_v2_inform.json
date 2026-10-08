@@ -1,92 +1,30 @@
 {
-  "cert_expires_at": null,
-  "command_results": [],
-  "config_hash": "sha256:cc9b51b63c139cb9df57e4de74ef5723e5d9065a0804eba2559aed344ffa291c",
-  "counters": {
-    "airtime_percent": 4.2,
-    "dropped": 2,
-    "duplicates": 4,
-    "forwarded": 7,
-    "rx_total": 11,
-    "tx_total": 7
-  },
-  "location": null,
+  "type": "inform",
+  "version": 2,
+  "device_id": "00000000-0000-4000-8000-000000000001",
+  "boot_id": "00000000-0000-4000-8000-000000000002",
+  "sent_at": "2026-01-01T00:01:00Z",
   "node_name": "fixture-repeater-01",
   "pubkey": "0x000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
-  "radio": {
-    "bandwidth": 62500,
-    "frequency": 869618000,
-    "mode": "forward",
-    "noise_floor_dbm": null,
-    "spreading_factor": 8,
-    "tx_power": 14
-  },
-  "radios": [
-    {
-      "bandwidth": 62500,
-      "frequency": 869618000,
-      "id": "rf-a",
-      "spreading_factor": 8,
-      "tx_power": 14
-    },
-    {
-      "bandwidth": 62500,
-      "frequency": 868100000,
-      "id": "rf-b",
-      "spreading_factor": 8,
-      "tx_power": 14
-    }
-  ],
-  "settings": {
-    "fabric": {
-      "default_radio": "rf-a",
-      "tx_mode": "default"
-    },
-    "glass": {
-      "api_token": "<redacted>",
-      "base_url": "https://glass.example.invalid",
-      "enabled": false,
-      "inform_interval_seconds": 30
-    },
-    "radio": {
-      "bandwidth": 62500,
-      "frequency": 869618000,
-      "spreading_factor": 8,
-      "tx_power": 14
-    },
-    "radio_type": "modem_tcp",
-    "radios": [
-      {
-        "id": "rf-a",
-        "radio": {
-          "frequency": 869618000
-        },
-        "radio_type": "modem_tcp"
-      },
-      {
-        "id": "rf-b",
-        "radio": {
-          "frequency": 868100000
-        },
-        "radio_type": "modem_tcp"
-      }
-    ],
-    "repeater": {
-      "identity_key": "<redacted>",
-      "mode": "forward",
-      "node_name": "fixture-repeater-01"
-    }
-  },
   "software_version": "0.0.0-fixture",
-  "state": "forward",
-  "system": {
-    "cpu_percent": 10.0,
-    "disk_percent": 30.0,
-    "load_avg_1m": null,
-    "memory_percent": 20.0,
-    "temperature_c": null
+  "capabilities": {"diagnostic.read": 1, "config.read": 1},
+  "inventory": {
+    "radios": [
+      {"id": "rf-a", "enabled": true, "radio_type": "modem_tcp"},
+      {"id": "rf-b", "enabled": false, "radio_type": null}
+    ],
+    "identities": [
+      {"id": "repeater-main", "kind": "repeater"},
+      {"id": "room-main", "kind": "room"},
+      {"id": "companion-main", "kind": "companion"}
+    ],
+    "sensors": [{"id": "battery-main", "sensor_type": "battery", "plugin_id": null}],
+    "plugins": []
   },
-  "type": "inform",
-  "uptime_seconds": 60,
-  "version": 2
+  "telemetry": {
+    "uptime_seconds": 60,
+    "radios": {"rf-a": {"frequency": 869618000}, "rf-b": null},
+    "sensors": {"battery-main": {"ok": false, "data": {}, "timestamp": null}}
+  },
+  "results": []
 }

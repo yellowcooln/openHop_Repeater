@@ -1,8 +1,17 @@
 {
-  "command_id": "fixture-command-01",
-  "completed_at": "2026-01-01T00:00:00Z",
-  "error_code": "unsupported_action",
-  "message": "Unsupported action: synthetic_unsupported_action",
+  "type": "result",
+  "version": 2,
+  "device_id": "00000000-0000-4000-8000-000000000001",
+  "boot_id": "00000000-0000-4000-8000-000000000002",
+  "sent_at": "2026-01-01T00:01:00Z",
+  "request_id": "00000000-0000-4000-8000-000000000003",
+  "execution_id": "00000000-0000-4000-8000-000000000004",
   "status": "unsupported",
-  "version": 2
+  "persisted": false,
+  "applied": false,
+  "restart_required": false,
+  "error_code": "unsupported_capability",
+  "message": "set_mode capability is unavailable; no mutation attempted",
+  "details": {},
+  "completed_at": "2026-01-01T00:01:00Z"
 }

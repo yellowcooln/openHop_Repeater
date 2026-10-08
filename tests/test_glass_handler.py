@@ -664,7 +664,7 @@ def test_post_inform_sync_uses_configured_ca_and_client_cert_chain(tmp_path, mon
     monkeypatch.setattr(_MODULE.ssl, "create_default_context", _fake_create_default_context)
     monkeypatch.setattr(_MODULE.request, "urlopen", _fake_urlopen)
 
-    response = handler._post_inform_sync({"type": "inform"})
+    response = handler._post_inform_sync({"type": "inform", "version": 1})
 
     assert response["type"] == "noop"
     assert calls["cafile"] == str(ca_path)
@@ -791,5 +791,29 @@ def test_contract_proposed_v2_fixtures_are_not_current_emission(monkeypatch, tmp
     current = asyncio.run(handler._build_inform_payload())
     proposed = _contract_fixture("proposed_v2_inform.json")
     assert current["version"] == 1 and proposed["version"] == 2
-    assert "radios" not in current and len(proposed["radios"]) == 2
+    assert "radios" not in current and len(proposed["inventory"]["radios"]) == 2
     assert _contract_fixture("proposed_v2_result.json")["status"] == "unsupported"
+
+
+def test_protocol_eligibility_does_not_activate_v2(monkeypatch, tmp_path):
+    handler = _contract_handler(monkeypatch, tmp_path, "legacy")
+    assert handler.protocol_eligibility(operational_credentials=True) == 1
+    handler.config["glass"]["device_id"] = "00000000-0000-4000-8000-000000000001"
+    assert handler.protocol_eligibility() == 1
+    assert handler.protocol_eligibility(operational_credentials=True) == 2
+    assert asyncio.run(handler._build_inform_payload())["version"] == 1
+    handler.config["glass"]["device_id"] = "bad"
+    with pytest.raises(ValueError):
+        handler.protocol_eligibility(operational_credentials=True)
+
+
+@pytest.mark.parametrize("version", [2, 3, True, "2", 2.0, None])
+def test_v2_never_posts_to_legacy_inform(monkeypatch, tmp_path, version):
+    handler = _contract_handler(monkeypatch, tmp_path, "legacy")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("must not open a network connection for non-v1 payloads")
+
+    monkeypatch.setattr(_MODULE.request, "urlopen", forbidden)
+    with pytest.raises(ValueError, match="protocol1 only"):
+        handler._post_inform_sync({"type": "inform", "version": version})

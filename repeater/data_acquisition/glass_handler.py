@@ -21,7 +21,8 @@ except ImportError:
     mqtt = None
 
 from repeater import __version__
-from repeater.policy_engine import PolicyEngine, SUPPORTED_ACTIONS, default_policy_engine_config
+from repeater.glass import negotiate_protocol
+from repeater.policy_engine import SUPPORTED_ACTIONS, PolicyEngine, default_policy_engine_config
 from repeater.service_utils import restart_service
 
 logger = logging.getLogger("GlassHandler")
@@ -171,6 +172,18 @@ class GlassHandler:
             str(username).strip() if isinstance(username, str) and username else None
         )
         self.mqtt_password = str(password) if isinstance(password, str) and password else None
+
+    def protocol_eligibility(self, *, operational_credentials: bool = False) -> int:
+        """Offline eligibility seam for later enrollment/authenticated transport.
+
+        The caller must explicitly report operational credential readiness, not
+        infer it from software_version, a pubkey, or the legacy API token. This
+        does not switch the live v1 producer/route or authenticate credentials.
+        """
+        return negotiate_protocol(
+            device_id=self.config.get("glass", {}).get("device_id"),
+            operational_credentials=operational_credentials,
+        )
 
     def _managed_settings_path(self) -> Path:
         return Path(self.cert_store_dir) / self._managed_settings_filename
@@ -464,6 +477,9 @@ class GlassHandler:
         return await loop.run_in_executor(None, self._post_inform_sync, payload)
 
     def _post_inform_sync(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        # No v2 delivery until an authenticated v2 route exists (Tasks4/6).
+        if type(payload.get("version")) is not int or payload["version"] != 1:
+            raise ValueError("Current Glass /inform transport supports protocol1 only")
         url = f"{self.base_url}/inform"
         self._validate_http_url(url)
         headers = {"Content-Type": "application/json"}
