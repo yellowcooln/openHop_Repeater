@@ -1,0 +1,8 @@
+{
+  "command_id": "fixture-command-01",
+  "completed_at": "2026-01-01T00:00:00Z",
+  "error_code": "unsupported_action",
+  "message": "Unsupported action: synthetic_unsupported_action",
+  "status": "unsupported",
+  "version": 2
+}

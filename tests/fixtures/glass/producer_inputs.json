@@ -1,0 +1,144 @@
+{
+  "configs": {
+    "legacy": {
+      "glass": {
+        "api_token": "<redacted>",
+        "base_url": "https://glass.example.invalid",
+        "enabled": false,
+        "inform_interval_seconds": 30
+      },
+      "radio": {
+        "bandwidth": 62500,
+        "frequency": 869618000,
+        "spreading_factor": 8,
+        "tx_power": 14
+      },
+      "radio_type": "modem_tcp",
+      "repeater": {
+        "identity_key": "<redacted>",
+        "mode": "forward",
+        "node_name": "fixture-repeater-01"
+      }
+    },
+    "multi_radio": {
+      "fabric": {
+        "default_radio": "rf-a",
+        "tx_mode": "default"
+      },
+      "glass": {
+        "api_token": "<redacted>",
+        "base_url": "https://glass.example.invalid",
+        "enabled": false,
+        "inform_interval_seconds": 30
+      },
+      "radio": {
+        "bandwidth": 62500,
+        "frequency": 869618000,
+        "spreading_factor": 8,
+        "tx_power": 14
+      },
+      "radio_type": "modem_tcp",
+      "radios": [
+        {
+          "id": "rf-a",
+          "radio": {
+            "frequency": 869618000
+          },
+          "radio_type": "modem_tcp"
+        },
+        {
+          "id": "rf-b",
+          "radio": {
+            "frequency": 868100000
+          },
+          "radio_type": "modem_tcp"
+        }
+      ],
+      "repeater": {
+        "identity_key": "<redacted>",
+        "mode": "forward",
+        "node_name": "fixture-repeater-01"
+      }
+    },
+    "null_radio": {
+      "glass": {
+        "api_token": "<redacted>",
+        "base_url": "https://glass.example.invalid",
+        "enabled": false,
+        "inform_interval_seconds": 30
+      },
+      "radio": {},
+      "radio_type": null,
+      "repeater": {
+        "identity_key": "<redacted>",
+        "mode": "forward",
+        "node_name": "fixture-repeater-01"
+      }
+    },
+    "sensor_edge": {
+      "glass": {
+        "api_token": "<redacted>",
+        "base_url": "https://glass.example.invalid",
+        "enabled": false,
+        "inform_interval_seconds": 30
+      },
+      "radio": {
+        "bandwidth": 62500,
+        "frequency": 869618000,
+        "spreading_factor": 8,
+        "tx_power": 14
+      },
+      "radio_type": "modem_tcp",
+      "repeater": {
+        "identity_key": "<redacted>",
+        "mode": "forward",
+        "node_name": "fixture-repeater-01"
+      }
+    }
+  },
+  "sensors": {
+    "configured": 2,
+    "enabled": true,
+    "loaded": 2,
+    "poll_interval_seconds": 30.0,
+    "readings": [
+      {
+        "data": {},
+        "error": "RuntimeError: synthetic sensor unavailable",
+        "name": "fixture-unavailable",
+        "ok": false,
+        "timestamp": null,
+        "type": "sensor"
+      },
+      {
+        "data": {
+          "battery_percent": 87.5
+        },
+        "name": "fixture-ups",
+        "ok": true,
+        "timestamp": "2026-01-01T00:00:00Z",
+        "type": "waveshare_ups_d"
+      }
+    ],
+    "running": true
+  },
+  "stats": {
+    "direct_dup_count": 1,
+    "dropped_count": 2,
+    "flood_dup_count": 3,
+    "forwarded_count": 7,
+    "noise_floor_dbm": null,
+    "rx_count": 11,
+    "sent_direct_count": 2,
+    "sent_flood_count": 5,
+    "uptime_seconds": 60,
+    "utilization_percent": 4.2
+  },
+  "system": {
+    "cpu_percent": 10.0,
+    "disk_percent": 30.0,
+    "load_avg_1m": null,
+    "memory_percent": 20.0,
+    "temperature_c": null
+  }
+}

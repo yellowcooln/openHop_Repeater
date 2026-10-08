@@ -3,6 +3,7 @@ import importlib.util
 import json
 import time
 from pathlib import Path
+
 import pytest
 import yaml
 
@@ -686,3 +687,109 @@ def test_build_ssl_context_raises_when_client_key_missing(tmp_path):
 
     with pytest.raises(RuntimeError, match="client_key_path"):
         handler._build_ssl_context("https://glass.example/inform")
+
+
+_CONTRACT_FIXTURES = Path(__file__).parent / "fixtures" / "glass"
+
+
+def _contract_fixture(name):
+    return json.loads((_CONTRACT_FIXTURES / name).read_text(encoding="utf-8"))
+
+
+def _contract_handler(monkeypatch, tmp_path, scenario):
+    inputs = _contract_fixture("producer_inputs.json")
+    config = inputs["configs"][scenario]
+    daemon = _DummyDaemon()
+    monkeypatch.setattr(daemon, "get_stats", lambda: inputs["stats"])
+    # Avoid host statistics, real identities, version drift and managed config reads.
+    monkeypatch.setattr(GlassHandler, "_load_managed_settings", lambda self: {})
+    monkeypatch.setattr(_MODULE, "__version__", "0.0.0-fixture")
+    daemon.local_identity = type(
+        "SyntheticIdentity", (), {"get_public_key": lambda self: bytes(range(32))}
+    )()
+    if scenario == "sensor_edge":
+        daemon.sensor_manager = _DummySensorManager(summary=inputs["sensors"])
+    handler = GlassHandler(config=config, daemon_instance=daemon)
+    monkeypatch.setattr(handler, "_collect_system_stats", lambda: inputs["system"])
+    return handler
+
+
+@pytest.mark.parametrize("scenario", ["legacy", "null_radio", "multi_radio", "sensor_edge"])
+def test_contract_fixture_matches_real_legacy_payload_builder(monkeypatch, tmp_path, scenario):
+    handler = _contract_handler(monkeypatch, tmp_path, scenario)
+    payload = asyncio.run(handler._build_inform_payload())
+    assert payload == _contract_fixture(f"{scenario}_inform.json")
+    assert payload["settings"]["repeater"]["identity_key"] == "<redacted>"
+    assert payload["settings"]["glass"]["api_token"] == "<redacted>"
+
+
+def test_contract_export_redacts_synthetic_nested_sensitive_values(monkeypatch, tmp_path):
+    handler = _contract_handler(monkeypatch, tmp_path, "legacy")
+    handler.config["repeater"]["identity_key"] = "synthetic-not-a-private-key"
+    handler.config["glass"]["api_token"] = "synthetic-not-a-token"
+    handler.config["extra"] = {
+        "nested": [{"password": "synthetic-not-a-password", "public_key": "fixture-public"}]
+    }
+    payload = asyncio.run(handler._build_inform_payload())
+    settings = payload["settings"]
+    assert settings["repeater"]["identity_key"] == "<redacted>"
+    assert settings["glass"]["api_token"] == "<redacted>"
+    assert settings["extra"]["nested"][0] == {
+        "password": "<redacted>", "public_key": "fixture-public"
+    }
+    assert "synthetic-not-a-" not in json.dumps(settings)
+    assert payload["config_hash"] != _contract_fixture("legacy_inform.json")["config_hash"]
+
+
+def test_contract_null_radio_reports_zeros_without_faking_hardware(monkeypatch, tmp_path):
+    handler = _contract_handler(monkeypatch, tmp_path, "null_radio")
+    payload = asyncio.run(handler._build_inform_payload())
+    assert payload["settings"]["radio_type"] is None
+    assert payload["radio"]["frequency"] == payload["radio"]["bandwidth"] == 0
+    assert "radios" not in payload
+
+
+def test_contract_multi_radio_is_settings_only_in_current_inform(monkeypatch, tmp_path):
+    handler = _contract_handler(monkeypatch, tmp_path, "multi_radio")
+    payload = asyncio.run(handler._build_inform_payload())
+    assert [entry["id"] for entry in payload["settings"]["radios"]] == ["rf-a", "rf-b"]
+    assert "radios" not in payload
+    assert payload["radio"] == _contract_fixture("legacy_inform.json")["radio"]
+
+
+def test_contract_unsupported_command_matches_actual_result_queue(monkeypatch, tmp_path):
+    from datetime import datetime, timezone
+
+    class FixedDatetime:
+        @staticmethod
+        def now(tz):
+            assert tz == timezone.utc
+            return datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    handler = _contract_handler(monkeypatch, tmp_path, "legacy")
+    monkeypatch.setattr(_MODULE, "datetime", FixedDatetime)
+    command = _contract_fixture("unsupported_command.json")
+    asyncio.run(handler._handle_command_response(command))
+    results = asyncio.run(handler._get_pending_command_results())
+    assert results == [_contract_fixture("legacy_result.json")]
+    # Pending results must actually travel in the next payload, not only an internal list.
+    payload = asyncio.run(handler._build_inform_payload())
+    assert payload["command_results"] == results
+
+
+def test_contract_sensor_edge_values_pass_through_without_invented_units(monkeypatch, tmp_path):
+    handler = _contract_handler(monkeypatch, tmp_path, "sensor_edge")
+    payload = asyncio.run(handler._build_inform_payload())
+    unavailable, legacy = payload["sensors"]["readings"]
+    assert unavailable["ok"] is False and unavailable["data"] == {}
+    assert unavailable["timestamp"] is None
+    assert "unit" not in legacy and "metrics" not in legacy
+
+
+def test_contract_proposed_v2_fixtures_are_not_current_emission(monkeypatch, tmp_path):
+    handler = _contract_handler(monkeypatch, tmp_path, "multi_radio")
+    current = asyncio.run(handler._build_inform_payload())
+    proposed = _contract_fixture("proposed_v2_inform.json")
+    assert current["version"] == 1 and proposed["version"] == 2
+    assert "radios" not in current and len(proposed["radios"]) == 2
+    assert _contract_fixture("proposed_v2_result.json")["status"] == "unsupported"

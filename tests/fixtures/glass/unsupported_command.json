@@ -1,0 +1,6 @@
+{
+  "action": "synthetic_unsupported_action",
+  "command_id": "fixture-command-01",
+  "params": {},
+  "type": "command"
+}

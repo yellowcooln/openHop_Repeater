@@ -1,0 +1,82 @@
+{
+  "cert_expires_at": null,
+  "command_results": [],
+  "config_hash": "sha256:535f9646bc039ebfe6f63e7107732d53fd27f3808a0e273463b11276e685a883",
+  "counters": {
+    "airtime_percent": 4.2,
+    "dropped": 2,
+    "duplicates": 4,
+    "forwarded": 7,
+    "rx_total": 11,
+    "tx_total": 7
+  },
+  "location": null,
+  "node_name": "fixture-repeater-01",
+  "pubkey": "0x000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "radio": {
+    "bandwidth": 62500,
+    "frequency": 869618000,
+    "mode": "forward",
+    "noise_floor_dbm": null,
+    "spreading_factor": 8,
+    "tx_power": 14
+  },
+  "sensors": {
+    "configured": 2,
+    "enabled": true,
+    "loaded": 2,
+    "poll_interval_seconds": 30.0,
+    "readings": [
+      {
+        "data": {},
+        "error": "RuntimeError: synthetic sensor unavailable",
+        "name": "fixture-unavailable",
+        "ok": false,
+        "timestamp": null,
+        "type": "sensor"
+      },
+      {
+        "data": {
+          "battery_percent": 87.5
+        },
+        "name": "fixture-ups",
+        "ok": true,
+        "timestamp": "2026-01-01T00:00:00Z",
+        "type": "waveshare_ups_d"
+      }
+    ],
+    "running": true
+  },
+  "settings": {
+    "glass": {
+      "api_token": "<redacted>",
+      "base_url": "https://glass.example.invalid",
+      "enabled": false,
+      "inform_interval_seconds": 30
+    },
+    "radio": {
+      "bandwidth": 62500,
+      "frequency": 869618000,
+      "spreading_factor": 8,
+      "tx_power": 14
+    },
+    "radio_type": "modem_tcp",
+    "repeater": {
+      "identity_key": "<redacted>",
+      "mode": "forward",
+      "node_name": "fixture-repeater-01"
+    }
+  },
+  "software_version": "0.0.0-fixture",
+  "state": "forward",
+  "system": {
+    "cpu_percent": 10.0,
+    "disk_percent": 30.0,
+    "load_avg_1m": null,
+    "memory_percent": 20.0,
+    "temperature_c": null
+  },
+  "type": "inform",
+  "uptime_seconds": 60,
+  "version": 1
+}
