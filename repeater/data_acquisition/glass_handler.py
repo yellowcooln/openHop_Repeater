@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import hashlib
 import json
 import logging
@@ -65,20 +66,9 @@ class GlassHandler:
         self.ca_cert_path: Optional[str] = None
         self._mqtt_client = None
         self._mqtt_ready = False
-        self._mqtt_runtime_signature: Optional[
-            Tuple[
-                str,
-                int,
-                str,
-                bool,
-                bool,
-                Optional[str],
-                Optional[str],
-                Optional[str],
-                Optional[str],
-                Optional[str],
-            ]
-        ] = None
+        self._mqtt_credentials = None
+        self._mqtt_connecting_credentials = None
+        self._mqtt_runtime_signature: Optional[Tuple[Any, ...]] = None
         self._managed_settings_filename = "managed.json"
 
         self._task: Optional[asyncio.Task] = None
@@ -86,6 +76,7 @@ class GlassHandler:
         self._pending_command_results: List[Dict[str, Any]] = []
         self._pending_lock = asyncio.Lock()
 
+        self._runtime_settings_valid = False
         self._reload_runtime_settings()
 
     async def start(self) -> None:
@@ -123,6 +114,41 @@ class GlassHandler:
         self._close_mqtt_publisher()
 
     def _reload_runtime_settings(self) -> None:
+        from repeater.glass.enrollment import EnrollmentError
+
+        # Parse on a detached candidate: no intermediate identity/settings are
+        # visible to the active publisher, and parsing cannot stop its client.
+        candidate = copy.copy(self)
+        candidate._mqtt_client = None
+        candidate._mqtt_ready = False
+        candidate._mqtt_runtime_signature = None
+        try:
+            candidate._parse_runtime_settings()
+        except Exception:  # noqa: BLE001 - credential/config errors must be safe
+            self._runtime_settings_valid = False
+            self._close_mqtt_publisher()
+            raise EnrollmentError("Unable to reload verified Glass runtime settings") from None
+
+        fields = (
+            "enabled", "base_url", "request_timeout_seconds", "verify_tls", "api_token",
+            "operational_credential_file", "_operational_credentials",
+            "inform_interval_seconds", "cert_store_dir", "client_cert_path",
+            "client_key_path", "ca_cert_path", "mqtt_enabled", "mqtt_broker_host",
+            "mqtt_broker_port", "mqtt_base_topic", "mqtt_tls_enabled", "mqtt_username",
+            "mqtt_password", "_mqtt_credentials",
+        )
+        if (
+            not candidate.enabled or not candidate.mqtt_enabled
+            or candidate._current_mqtt_signature() != self._mqtt_runtime_signature
+            or candidate._operational_credentials != getattr(self, "_operational_credentials", None)
+        ):
+            # Invalidate before exposing a new successful snapshot, even when
+            # the caller has not yet synchronized/reconnected MQTT.
+            self._close_mqtt_publisher()
+        self.__dict__.update({field: getattr(candidate, field) for field in fields})
+        self._runtime_settings_valid = True
+
+    def _parse_runtime_settings(self) -> None:
         glass_cfg = self.config.get("glass", {})
         self.enabled = bool(glass_cfg.get("enabled", False))
 
@@ -137,16 +163,19 @@ class GlassHandler:
         if self.operational_credential_file:
             from repeater.glass.enrollment import load_credentials, validate_https_url
 
-            validate_https_url(self.base_url)
-            if glass_cfg.get("verify_tls", True) is not True:
-                raise ValueError("Operational Glass credentials require verified HTTPS")
-            self._operational_credentials = load_credentials(
-                self.operational_credential_file,
-                base_url=self.base_url,
-                device_id=glass_cfg.get("device_id"),
-            )
+            try:
+                validate_https_url(self.base_url)
+                if glass_cfg.get("verify_tls", True) is not True:
+                    raise ValueError("Operational Glass credentials require verified HTTPS")
+                self._operational_credentials = load_credentials(
+                    self.operational_credential_file,
+                    base_url=self.base_url,
+                    device_id=glass_cfg.get("device_id"),
+                )
+            except Exception:
+                self._close_mqtt_publisher()
+                raise
             self.api_token = self._operational_credentials["operational_token"]
-            self._cert_expires_at = self._operational_credentials["expires_at"]
         self.inform_interval_seconds = self._clamp_interval(
             int(glass_cfg.get("inform_interval_seconds", self.inform_interval_seconds))
         )
@@ -174,10 +203,9 @@ class GlassHandler:
         self.mqtt_enabled = bool(managed_cfg.get("mqtt_enabled", False))
         host_value = managed_cfg.get("mqtt_broker_host", default_host)
         self.mqtt_broker_host = str(host_value or default_host).strip() or default_host
-        try:
-            self.mqtt_broker_port = max(1, int(managed_cfg.get("mqtt_broker_port", 1883)))
-        except (TypeError, ValueError):
-            self.mqtt_broker_port = 1883
+        self.mqtt_broker_port = int(managed_cfg.get("mqtt_broker_port", 1883))
+        if not 1 <= self.mqtt_broker_port <= 65535:
+            raise ValueError("Invalid MQTT broker port")
         topic_value = managed_cfg.get("mqtt_base_topic", "glass")
         self.mqtt_base_topic = str(topic_value or "glass").strip("/")
         self.mqtt_tls_enabled = bool(managed_cfg.get("mqtt_tls_enabled", False))
@@ -187,6 +215,27 @@ class GlassHandler:
             str(username).strip() if isinstance(username, str) and username else None
         )
         self.mqtt_password = str(password) if isinstance(password, str) and password else None
+        self._mqtt_credentials = None
+        if self._operational_credentials and self.mqtt_enabled:
+            if (
+                managed_cfg.get("mqtt_tls_enabled") is not True
+                or managed_cfg.get("mqtt_base_topic", "glass") != "glass"
+                or managed_cfg.get("mqtt_username") not in (None, "")
+                or managed_cfg.get("mqtt_password") not in (None, "")
+            ):
+                self._close_mqtt_publisher()
+                raise ValueError("Enrolled MQTT requires verified TLS, glass prefix and no password overrides")
+            from repeater.glass.mqtt_credentials import materialize_credentials
+
+            try:
+                self._mqtt_credentials = materialize_credentials(
+                    self.operational_credential_file, base_url=self.base_url,
+                    device_id=self._operational_credentials["device_id"],
+                    store_dir=self.cert_store_dir,
+                )
+            except Exception:
+                self._close_mqtt_publisher()
+                raise
 
     def protocol_eligibility(self, *, operational_credentials: bool = False) -> int:
         """Offline eligibility seam for later enrollment/authenticated transport.
@@ -209,12 +258,10 @@ class GlassHandler:
             return {}
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            logger.warning("Invalid Glass managed settings file at %s: %s", path, exc)
-            return {}
+        except Exception:
+            raise ValueError("Invalid Glass managed settings file") from None
         if not isinstance(raw, dict):
-            logger.warning("Ignoring non-object Glass managed settings file at %s", path)
-            return {}
+            raise TypeError("Glass managed settings must be an object")
         return raw
 
     def _save_managed_settings(self, updates: Dict[str, Any], *, replace: bool) -> Tuple[bool, str]:
@@ -1153,7 +1200,7 @@ class GlassHandler:
             self._pending_command_results.append(result)
 
     def publish_telemetry(self, record_type: str, record: Dict[str, Any]) -> None:
-        if not self.enabled or not self.mqtt_enabled or not self._mqtt_ready:
+        if not self._runtime_settings_valid or not self.enabled or not self.mqtt_enabled or not self._mqtt_ready:
             return
         if not self._mqtt_client:
             return
@@ -1170,13 +1217,15 @@ class GlassHandler:
         payload = self._normalize_for_hash(record)
 
         envelope: Dict[str, Any] = {
-            "version": 1,
+            "version": 2 if self._operational_credentials else 1,
             "type": event_type,
             "topic": topic,
             "node_name": node_name,
             "timestamp": timestamp,
             "payload": payload,
         }
+        if self._operational_credentials:
+            envelope["device_id"] = self._operational_credentials["device_id"]
         if event_type == "event" and event_name:
             envelope["event_name"] = event_name
 
@@ -1188,6 +1237,11 @@ class GlassHandler:
 
     def _mqtt_topic_for_record(self, *, node_name: str, record_type: str) -> str:
         base = self.mqtt_base_topic.strip("/") or "glass"
+        if self._operational_credentials:
+            base = "glass"
+            node_name = "device:" + self._operational_credentials["device_id"]
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", record_type):
+                raise ValueError("Invalid enrolled MQTT record type")
         if record_type in ("packet", "advert"):
             return f"{base}/{node_name}/{record_type}"
         return f"{base}/{node_name}/event/{record_type}"
@@ -1215,7 +1269,7 @@ class GlassHandler:
         return dt.isoformat().replace("+00:00", "Z")
 
     def _init_mqtt_publisher(self) -> None:
-        if not self.mqtt_enabled:
+        if not self._runtime_settings_valid or not self.mqtt_enabled:
             self._close_mqtt_publisher()
             return
         if mqtt is None:
@@ -1224,22 +1278,34 @@ class GlassHandler:
             return
         if self._mqtt_client is not None:
             return
+        if self._operational_credentials and (
+            not self.verify_tls or not self.mqtt_tls_enabled
+            or self.mqtt_base_topic != "glass" or self.mqtt_username or self.mqtt_password
+            or self._mqtt_credentials is None
+        ):
+            self._close_mqtt_publisher()
+            raise ValueError("Invalid enrolled MQTT TLS configuration")
 
+        client = None
         try:
             client = mqtt.Client()
             if self.mqtt_username:
                 client.username_pw_set(self.mqtt_username, self.mqtt_password)
             if self.mqtt_tls_enabled:
+                material = self._mqtt_credentials
+                mqtt_ca_path = material.ca_cert_path if material else self.ca_cert_path
+                mqtt_cert_path = material.client_cert_path if material else self.client_cert_path
+                mqtt_key_path = material.client_key_path if material else self.client_key_path
                 ca_certs = (
-                    self._require_ssl_file(self.ca_cert_path, "ca_cert_path")
-                    if self.ca_cert_path
+                    self._require_ssl_file(mqtt_ca_path, "mqtt_ca_cert_path")
+                    if mqtt_ca_path
                     else None
                 )
                 certfile = None
                 keyfile = None
-                if self.client_cert_path or self.client_key_path:
-                    certfile = self._require_ssl_file(self.client_cert_path, "client_cert_path")
-                    keyfile = self._require_ssl_file(self.client_key_path, "client_key_path")
+                if mqtt_cert_path or mqtt_key_path:
+                    certfile = self._require_ssl_file(mqtt_cert_path, "mqtt_client_cert_path")
+                    keyfile = self._require_ssl_file(mqtt_key_path, "mqtt_client_key_path")
                 cert_reqs = ssl.CERT_REQUIRED if self.verify_tls else ssl.CERT_NONE
                 client.tls_set(
                     ca_certs=ca_certs,
@@ -1252,6 +1318,8 @@ class GlassHandler:
                     client.tls_insecure_set(True)
             client.on_connect = self._on_mqtt_connect
             client.on_disconnect = self._on_mqtt_disconnect
+            self._mqtt_client = client
+            self._mqtt_connecting_credentials = self._mqtt_credentials
             client.connect_async(self.mqtt_broker_host, self.mqtt_broker_port, 60)
             client.loop_start()
             self._mqtt_client = client
@@ -1262,69 +1330,74 @@ class GlassHandler:
                 self.mqtt_broker_port,
                 self.mqtt_base_topic,
             )
-        except Exception as exc:
+        except Exception:  # noqa: BLE001 - client errors can contain credentials
+            # Detach before cleanup: queued callbacks must not revive readiness.
             self._mqtt_client = None
             self._mqtt_ready = False
             self._mqtt_runtime_signature = None
-            logger.warning("Failed to start Glass MQTT telemetry publisher: %s", exc)
+            self._mqtt_connecting_credentials = None
+            if client is not None:
+                # Even pre-connect TLS/auth failures may own client resources.
+                # Attempt both actions independently, including after partial start.
+                for action_name in ("loop_stop", "disconnect"):
+                    try:
+                        getattr(client, action_name)()
+                    except Exception:  # noqa: BLE001 - never log client/config secrets
+                        logger.debug("Error stopping Glass MQTT telemetry publisher")
+            logger.warning("Failed to start Glass MQTT telemetry publisher")
 
     def _close_mqtt_publisher(self) -> None:
         client = self._mqtt_client
         self._mqtt_client = None
         self._mqtt_ready = False
         self._mqtt_runtime_signature = None
+        self._mqtt_connecting_credentials = None
         if client is None:
             return
-        try:
-            client.loop_stop()
-            client.disconnect()
-        except Exception as exc:
-            logger.debug("Error stopping Glass MQTT telemetry publisher: %s", exc)
+        for action in (client.loop_stop, client.disconnect):
+            try:
+                action()
+            except Exception:  # noqa: BLE001 - never log client/config secrets
+                logger.debug("Error stopping Glass MQTT telemetry publisher")
 
     def _on_mqtt_connect(self, _client, _userdata, _flags, reason_code, _properties=None) -> None:
+        if _client is not self._mqtt_client:
+            return
         rc = getattr(reason_code, "value", reason_code)
         if rc == 0:
             self._mqtt_ready = True
+            if self._mqtt_connecting_credentials:
+                self._cert_expires_at = self._mqtt_connecting_credentials.expires_at
             logger.info("Glass MQTT telemetry publisher connected")
             return
         self._mqtt_ready = False
         logger.warning("Glass MQTT telemetry publisher connect failed (code=%s)", rc)
 
     def _on_mqtt_disconnect(self, _client, _userdata, reason_code, _properties=None) -> None:
+        if _client is not self._mqtt_client:
+            return
         self._mqtt_ready = False
         rc = getattr(reason_code, "value", reason_code)
         if rc:
             logger.warning("Glass MQTT telemetry publisher disconnected (code=%s)", rc)
 
-    def _current_mqtt_signature(
-        self,
-    ) -> Tuple[
-        str,
-        int,
-        str,
-        bool,
-        bool,
-        Optional[str],
-        Optional[str],
-        Optional[str],
-        Optional[str],
-        Optional[str],
-    ]:
+    def _current_mqtt_signature(self) -> Tuple[Any, ...]:
         return (
             self.mqtt_broker_host,
             self.mqtt_broker_port,
             self.mqtt_base_topic,
             self.mqtt_tls_enabled,
             self.verify_tls,
-            self.ca_cert_path,
-            self.client_cert_path,
-            self.client_key_path,
+            self._mqtt_credentials.ca_cert_path if self._mqtt_credentials else self.ca_cert_path,
+            self._mqtt_credentials.client_cert_path if self._mqtt_credentials else self.client_cert_path,
+            self._mqtt_credentials.client_key_path if self._mqtt_credentials else self.client_key_path,
             self.mqtt_username,
             self.mqtt_password,
+            self._mqtt_credentials.fingerprint if self._mqtt_credentials else None,
         )
 
     def _sync_mqtt_publisher(self) -> None:
-        if not self.enabled or not self.mqtt_enabled:
+        if not self._runtime_settings_valid or not self.enabled or not self.mqtt_enabled:
             self._close_mqtt_publisher()
             return
         if mqtt is None:

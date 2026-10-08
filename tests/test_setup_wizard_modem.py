@@ -6,9 +6,12 @@ a config.yaml that matches what get_radio_for_board() expects (see
 repeater/config.py and tests/test_radio_config.py).
 """
 
+import inspect
 import json
 import sys
+import threading
 import types
+from unittest.mock import Mock
 
 import cherrypy
 import pytest
@@ -78,12 +81,76 @@ def wizard_env(tmp_path, monkeypatch):
     fake_service_utils.restart_service = lambda: None
     monkeypatch.setitem(sys.modules, "repeater.service_utils", fake_service_utils)
 
+    # delayed_restart imports service_utils *after* its two-second sleep. Keep
+    # that module stub installed until every wizard worker has completed, even
+    # when the test fails. Only observe wizard workers; run their real targets.
+    restart_threads = []
+    real_start = threading.Thread.start
+
+    def tracked_start(thread):
+        if getattr(getattr(thread, "_target", None), "__name__", "") == "delayed_restart":
+            restart_threads.append(thread)
+        real_start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", tracked_start)
+
     def _set_request(body):
         # cherrypy.request is a thread-local — populate the bits the handler reads.
         cherrypy.request.method = "POST"
         cherrypy.request.json = body
 
-    return tmp_path, config_path, endpoints, _set_request
+    try:
+        yield tmp_path, config_path, endpoints, _set_request
+    finally:
+        for thread in restart_threads:
+            if thread.ident is not None:
+                thread.join()
+            assert not thread.is_alive(), "wizard restart worker escaped fixture teardown"
+
+
+@pytest.mark.parametrize("test_raises", [False, True], ids=["success", "failure"])
+def test_wizard_fixture_joins_restart_before_restoring_mock(tmp_path, test_raises):
+    """Exercise fixture teardown with real threads, without ever permitting a restart."""
+    created = []
+    real_thread = threading.Thread
+
+    class ObservedThread(real_thread):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            if getattr(getattr(self, "_target", None), "__name__", "") == "delayed_restart":
+                created.append(self)
+
+    with pytest.MonkeyPatch.context() as patches:
+        patches.setattr(threading, "Thread", ObservedThread)
+        fixture = inspect.unwrap(wizard_env)(tmp_path, patches)
+        is_generator = inspect.isgenerator(fixture)
+        env = next(fixture) if is_generator else fixture
+        restart = Mock()
+        patches.setattr(sys.modules["repeater.service_utils"], "restart_service", restart)
+        try:
+            _tmp, _config, endpoints, set_request = env
+            set_request(dict(_BASE_REQUEST, hardware_key="modem_usb"))
+            assert endpoints.setup_wizard()["success"] is True
+            assert len(created) == 1
+            if is_generator:
+                if test_raises:
+                    with pytest.raises(RuntimeError, match="simulated test failure"):
+                        fixture.throw(RuntimeError("simulated test failure"))
+                else:
+                    with pytest.raises(StopIteration):
+                        next(fixture)
+            assert not any(thread.is_alive() for thread in created), (
+                "wizard restart thread survived fixture teardown; its delayed import "
+                "can call the real restart_service after monkeypatch restoration"
+            )
+            restart.assert_called_once_with()
+        finally:
+            # The red regression must also be safe: retain the mocked module until
+            # every observed worker finishes, even when the lifetime assertion fails.
+            for thread in created:
+                thread.join()
+            if is_generator:
+                fixture.close()
 
 
 def _read_yaml(path):
