@@ -250,8 +250,11 @@ def _validate(value, current, context, binding):
     return value
 
 
-def _remaining(directory, value, current, context, binding):
-    _no_outbox(directory)
+def _remaining(directory, value, current, context, binding, allow_outbox=False):
+    # Report consumers validate the active outbox themselves under this same
+    # lock. Completion callers retain the default unconditional refusal.
+    if not allow_outbox:
+        _no_outbox(directory)
     pending = r._read_pending(directory, context)
     if pending is not None and (
         pending["request_id"] != value["request_id"]

@@ -124,27 +124,7 @@ def _authority(credentials, store_dir, credential_file):
         if r._context(current) != context or not r._same_bundle(current, credentials):
             raise EnrollmentError("Installed credential mismatch")
         _uuid(current["rotation_request_id"])
-        state = r._read_pending(directory, context)
-        if state is None:
-            raise EnrollmentError("Missing pending request")
-        journal, _ = _read_private_json(directory, "install.json", r._JOURNAL_LIMIT)
-        previous = r._validate_install_journal(journal, context, state, path)
-        response = {
-            k: current[k]
-            for k in (
-                "device_id",
-                "client_cert",
-                "ca_cert",
-                "cert_serial",
-                "expires_at",
-                "fingerprint_sha256",
-            )
-        }
-        response.update(request_id=current["rotation_request_id"], state="issued")
-        candidate = r._build_renewal_candidate(previous, r._renewal_response(response), state)
         digest = r._bundle_digest(current)
-        if not r._same_bundle(candidate, current) or journal["candidate_sha256"] != digest:
-            raise EnrollmentError("Installed candidate authority mismatch")
         binding = {
             "version": 1,
             "base_url": context["base_url"],
@@ -152,7 +132,40 @@ def _authority(credentials, store_dir, credential_file):
             "credential_file": path,
             "candidate_sha256": digest,
         }
-        yield directory, current, binding
+        # Completion imports this module at startup. Import only here and use
+        # pure validators on our already-locked descriptors, never its authority.
+        from repeater.glass import rotation_completion as c
+
+        try:
+            completed, _ = _read_private_json(directory, c._COMPLETED, c._LIMIT)
+        except FileNotFoundError:
+            completed = None
+        if completed is not None:
+            c._response(current)
+            c._validate(completed, current, context, binding)
+            c._remaining(directory, completed, current, context, binding, allow_outbox=True)
+        else:
+            state = r._read_pending(directory, context)
+            if state is None:
+                raise EnrollmentError("Missing pending request")
+            journal, _ = _read_private_json(directory, "install.json", r._JOURNAL_LIMIT)
+            previous = r._validate_install_journal(journal, context, state, path)
+            response = {
+                k: current[k]
+                for k in (
+                    "device_id",
+                    "client_cert",
+                    "ca_cert",
+                    "cert_serial",
+                    "expires_at",
+                    "fingerprint_sha256",
+                )
+            }
+            response.update(request_id=current["rotation_request_id"], state="issued")
+            candidate = r._build_renewal_candidate(previous, r._renewal_response(response), state)
+            if not r._same_bundle(candidate, current) or journal["candidate_sha256"] != digest:
+                raise EnrollmentError("Installed candidate authority mismatch")
+        yield directory, current, binding, completed
     finally:
         failed = False
         for fd in reversed(fds):
@@ -164,12 +177,15 @@ def _authority(credentials, store_dir, credential_file):
             raise EnrollmentError("Unable to release private report descriptors") from None
 
 
-def _record(directory, name, current, binding):
+def _record(directory, name, current, binding, accepted_fallback=None):
     limit = 8192 if name == _ACCEPTED else 4096
     try:
         value, raw = _read_private_json(directory, name, limit)
     except FileNotFoundError:
-        return None, None
+        if name != _ACCEPTED or accepted_fallback is None:
+            return None, None
+        # Trusted, validated completion data only; never reconstruct a file.
+        value, raw = accepted_fallback, None
     fields = _RECORD_FIELDS | ({"ack"} if name == _ACCEPTED else set())
     if set(value) != fields or type(value["version"]) is not int or value["version"] != 1:
         raise EnrollmentError("Invalid report record fields")
@@ -215,7 +231,9 @@ def queue_report(
     This API cannot establish that a successful callback actually occurred.
     """
     try:
-        with _authority(credentials, store_dir, credential_file) as (directory, current, binding):
+        with _authority(credentials, store_dir, credential_file) as authority:
+            directory, current, binding, completed = authority
+            accepted_fallback = None if completed is None else completed["accepted_record"]
             proposed = _report(
                 {
                     "device_id": current["device_id"],
@@ -228,7 +246,9 @@ def queue_report(
                 current,
             )
             outbox, _ = _record(directory, _OUTBOX, current, binding)
-            accepted, _ = _record(directory, _ACCEPTED, current, binding)
+            accepted, _ = _record(
+                directory, _ACCEPTED, current, binding, accepted_fallback=accepted_fallback
+            )
             if outbox is not None:
                 _fsync(directory)
                 return dict(outbox["report"])
@@ -245,9 +265,11 @@ def queue_report(
 def load_report(credentials, *, store_dir, credential_file):
     """Read validated existing report state without creating or deleting entries."""
     try:
-        with _authority(credentials, store_dir, credential_file) as (directory, current, binding):
+        with _authority(credentials, store_dir, credential_file) as authority:
+            directory, current, binding, completed = authority
+            accepted_fallback = None if completed is None else completed["accepted_record"]
             outbox, _ = _record(directory, _OUTBOX, current, binding)
-            _record(directory, _ACCEPTED, current, binding)
+            _record(directory, _ACCEPTED, current, binding, accepted_fallback=accepted_fallback)
             return None if outbox is None else dict(outbox["report"])
     except Exception:  # noqa: BLE001 - Expose only a safe public error, never private failure details.
         raise EnrollmentError("Unable to load public Glass certificate report") from None
@@ -265,11 +287,15 @@ def acknowledge_report(
     its transaction. Never accept a guard from user-controlled input.
     """
     try:
-        with _authority(credentials, store_dir, credential_file) as (directory, current, binding):
+        with _authority(credentials, store_dir, credential_file) as authority:
+            directory, current, binding, completed = authority
+            accepted_fallback = None if completed is None else completed["accepted_record"]
             expected = _report(report, current)
             ack = _ack(response, expected)
             outbox, raw = _record(directory, _OUTBOX, current, binding)
-            accepted, _ = _record(directory, _ACCEPTED, current, binding)
+            accepted, _ = _record(
+                directory, _ACCEPTED, current, binding, accepted_fallback=accepted_fallback
+            )
             receipt = dict(binding, report=expected, ack=ack)
             reuse_accepted = accepted is not None and _same(accepted, receipt)
             if outbox is None:
@@ -287,7 +313,9 @@ def acknowledge_report(
                     _publish(directory, _ACCEPTED, dict(outbox, ack=ack), current, binding)
                 else:
                     _fsync(directory)
-                    checked, _ = _record(directory, _ACCEPTED, current, binding)
+                    checked, _ = _record(
+                        directory, _ACCEPTED, current, binding, accepted_fallback=accepted_fallback
+                    )
                     if checked is None or not _same(checked, receipt):
                         raise EnrollmentError("Accepted report readback mismatch")
                 checked, reread = _record(directory, _OUTBOX, current, binding)
@@ -295,7 +323,9 @@ def acknowledge_report(
                     raise EnrollmentError("Outbox changed before removal")
                 _unlink(_OUTBOX, dir_fd=directory)
             _fsync(directory)
-            checked, _ = _record(directory, _ACCEPTED, current, binding)
+            checked, _ = _record(
+                directory, _ACCEPTED, current, binding, accepted_fallback=accepted_fallback
+            )
             if checked is None or not _same(checked, receipt):
                 raise EnrollmentError("Accepted report final readback mismatch")
             return ack

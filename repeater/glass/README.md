@@ -439,3 +439,36 @@ accepted node assertion plus local matched key/journal retirement, **not**
 broker verification, revocation, real-broker ownership, Task5 completion or
 permission to activate this core. Secure-ancestry synthetic tests and parent
 full-suite/spec/independent-review gates remain mandatory.
+
+## Current-leaf report authority after retirement (Task5(c6b1))
+
+This section supersedes the earlier requirement for pending/journal report
+state **only for an already completed, still-valid CURRENT leaf**. Under the
+same fixed exclusive lock, report queue/load/acknowledgment validate optional
+private `completed.json` with c6a's exact context, path, request, leaf metadata,
+current digest, historical journal/backup and embedded acceptance checks.
+A present unsafe, malformed or foreign completion is never ignored, even if
+ordinary pending/journal state remains. Any surviving pending key/CSR/digest
+or journal must still exactly match the completion. Report operations never
+retire those files, rewrite completion or change current/MQTT credentials.
+An expired historical backup is allowed only through a validated completion;
+ordinary CURRENT certificate validity is unchanged.
+
+The existing private `report-accepted.json` takes precedence. Only its absence
+allows the validated embedded accepted record to stand in, with the same strict
+8192-byte record validation and current binding. No file is reconstructed.
+Same-boot acceptance suppresses new outbox/HTTP work; `load_report` returns only
+an actual pending outbox, never embedded acceptance. An exact no-outbox ACK may
+idempotently fsync/read back that embedded receipt after the unchanged once-only
+commit guard. A fresh trusted current-client callback for another boot may
+queue a new outbox and publish a real new accepted file. Completion retains
+its immutable original acceptance. Older-boot outboxes remain until their exact
+full-report ACK; stale responses cannot delete a different boot's report.
+
+A report outbox is permitted for this report-authority validation only and is
+then fully validated before any queue/load/ACK decision. Completion and its
+loader still reject **any** outbox by default; this is not retirement permission.
+Public APIs and wire/configuration formats are unchanged. No handler retirement
+callsite, new-cycle transition, expired-CURRENT loader, broker proof or activation
+is introduced. New-cycle/consumer gates must precede any c6a activation; the
+original Task5 remains incomplete.

@@ -880,9 +880,10 @@ def test_ack_admission_wait_boundary(unit_handler, monkeypatch, caplog, change, 
         if not admitted:
             waiting.set()
             assert release.wait(5)
-        yield 123, current, {}
+        yield 123, current, {}, None
 
-    def record(directory, name, *a):
+    def record(directory, name, *a, accepted_fallback=None):
+        assert accepted_fallback is None
         assert not handler._mqtt_lock._is_owned()
         return records.get(name), b"exact-outbox" if name == q._OUTBOX else None
 
