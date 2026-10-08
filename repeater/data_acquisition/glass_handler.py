@@ -75,6 +75,7 @@ class GlassHandler:
         self._stop_event: Optional[asyncio.Event] = None
         self._pending_command_results: List[Dict[str, Any]] = []
         self._pending_lock = asyncio.Lock()
+        self._rotation_lock = asyncio.Lock()
 
         self._runtime_settings_valid = False
         self._reload_runtime_settings()
@@ -113,17 +114,18 @@ class GlassHandler:
 
         self._close_mqtt_publisher()
 
-    def _reload_runtime_settings(self) -> None:
+    def _reload_runtime_settings(self, *, _candidate=None) -> None:
         from repeater.glass.enrollment import EnrollmentError
 
         # Parse on a detached candidate: no intermediate identity/settings are
         # visible to the active publisher, and parsing cannot stop its client.
-        candidate = copy.copy(self)
+        candidate = _candidate if _candidate is not None else copy.copy(self)
         candidate._mqtt_client = None
         candidate._mqtt_ready = False
         candidate._mqtt_runtime_signature = None
         try:
-            candidate._parse_runtime_settings()
+            if _candidate is None:
+                candidate._parse_runtime_settings()
         except Exception:  # noqa: BLE001 - credential/config errors must be safe
             self._runtime_settings_valid = False
             self._close_mqtt_publisher()
@@ -287,12 +289,15 @@ class GlassHandler:
 
     async def _run_loop(self) -> None:
         while self._stop_event and not self._stop_event.is_set():
-            self._reload_runtime_settings()
-            self._sync_mqtt_publisher()
             try:
+                self._reload_runtime_settings()
+                self._sync_mqtt_publisher()
                 interval = await self._inform_once()
             except Exception as exc:
-                logger.warning("Glass inform failed: %s", exc)
+                if self.config.get("glass", {}).get("operational_credential_file"):
+                    logger.warning("Glass authenticated inform or runtime reload failed")
+                else:
+                    logger.warning("Glass inform failed: %s", exc)
                 interval = self.inform_interval_seconds
 
             wait_seconds = self._clamp_interval(interval)
@@ -309,6 +314,7 @@ class GlassHandler:
             return self.inform_interval_seconds
 
         payload = await self._build_inform_payload()
+        authenticated = bool(self._operational_credentials)
         response = await self._post_inform(payload)
 
         if payload.get("command_results"):
@@ -342,7 +348,116 @@ class GlassHandler:
 
         if isinstance(response_interval, int):
             self.inform_interval_seconds = self._clamp_interval(response_interval)
+        if authenticated:
+            await self._maintain_operational_certificate()
         return self.inform_interval_seconds
+
+    async def _maintain_operational_certificate(self) -> None:
+        # Snapshot before dispatch: workers never mutate the active publisher.
+        async with self._rotation_lock:
+            if not self.enabled or not self._operational_credentials:
+                return
+            snapshot = copy.deepcopy(self.config)
+
+            def binding():
+                return (
+                    self.enabled, self.verify_tls, self.base_url,
+                    self._operational_credentials.get("device_id") if self._operational_credentials else None,
+                    self.operational_credential_file, self.cert_store_dir, self.ca_cert_path,
+                )
+
+            bound = binding()
+            candidate = copy.copy(self)
+            candidate.config = snapshot
+            candidate._mqtt_client = None
+            candidate._mqtt_ready = False
+            candidate._mqtt_runtime_signature = None
+
+            def maintain():
+                from cryptography import x509
+
+                from repeater.glass.rotation_transport import renew_credentials, rotation_pending
+
+                candidate._reload_runtime_settings()
+                if not candidate.enabled or not candidate._operational_credentials:
+                    return False
+                cert = x509.load_pem_x509_certificate(
+                    candidate._operational_credentials["client_cert"].encode("ascii")
+                )
+                due = (cert.not_valid_after_utc - datetime.now(timezone.utc)).total_seconds() <= 86400
+                pending = rotation_pending(candidate.cert_store_dir)
+                if not due and not pending:
+                    return False
+                renew_credentials(
+                    credential_file=candidate.operational_credential_file,
+                    base_url=candidate.base_url,
+                    device_id=candidate._operational_credentials["device_id"],
+                    store_dir=candidate.cert_store_dir,
+                    https_ca_file=candidate.ca_cert_path,
+                    timeout=candidate.request_timeout_seconds,
+                )
+                candidate._reload_runtime_settings()
+                return True
+
+            def owned_maintain():
+                # Cancelled shield wrappers can report worker exceptions through
+                # the loop exception handler (including secret exception text).
+                # Keep failures as data until the owning coroutine handles them.
+                try:
+                    return maintain(), False
+                except Exception:  # noqa: BLE001 - worker failures must be sanitized
+                    return False, True
+
+            try:
+                # Shield the executor future, not just the caller's await: the
+                # lock belongs to the actual worker until it finishes. Repeated
+                # caller cancellation must not release that ownership early.
+                worker = asyncio.get_running_loop().run_in_executor(None, owned_maintain)
+                cancelled = None
+                installed = False
+                try:
+                    while not worker.done():
+                        try:
+                            await asyncio.shield(worker)
+                        except asyncio.CancelledError as exc:
+                            cancelled = exc
+                            self._runtime_settings_valid = False
+                            self._close_mqtt_publisher()
+                        except Exception:  # noqa: BLE001 - retrieve executor failure below
+                            # Retrieve the worker error below, including when
+                            # completion races with cancellation.
+                            break
+                    installed, failed = worker.result()
+                    if failed:
+                        raise ValueError("Glass operational credential maintenance failed")
+                except Exception:
+                    if cancelled is None:
+                        raise
+                    logger.warning("Glass operational credential maintenance failed")
+                finally:
+                    if cancelled is not None:
+                        # A worker may have installed files, but a cancelled
+                        # candidate must never activate. Invalidate again after
+                        # draining in case settings were reloaded meanwhile.
+                        self._runtime_settings_valid = False
+                        self._close_mqtt_publisher()
+                        raise cancelled
+                if self.config != snapshot or binding() != bound:
+                    self._runtime_settings_valid = False
+                    self._close_mqtt_publisher()
+                    raise ValueError("Glass configuration changed during renewal")
+                if installed:
+                    # Keep this inform response's interval/result semantics.
+                    interval = self.inform_interval_seconds
+                    self._reload_runtime_settings(_candidate=candidate)
+                    self.inform_interval_seconds = interval
+                    self._sync_mqtt_publisher()
+                    logger.info("Glass operational credential bundle installed")
+            except Exception:  # noqa: BLE001 - successful inform must remain successful
+                if self.config != snapshot or binding() != bound:
+                    self._runtime_settings_valid = False
+                    self._close_mqtt_publisher()
+                logger.warning("Glass operational credential maintenance failed")
 
     async def _build_inform_payload(self) -> Dict[str, Any]:
         if not self.daemon_instance or not getattr(self.daemon_instance, "local_identity", None):

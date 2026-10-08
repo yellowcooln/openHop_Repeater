@@ -230,3 +230,40 @@ The public receipt contains only `device_id`, `request_id`, `cert_serial`,
 connection callback, server installation acknowledgment, delivery or broker
 proof. There are no handler calls, network operations, activation, reporting or
 pending/journal retirement in this slice; those remain separate gated work.
+
+## Verified HTTPS renewal and handler cutover (Task5(c4))
+
+This section supersedes the historical inactivity statements above only for
+transport orchestration and handler activation. `rotation_transport.renew_credentials`
+loads valid current credentials, durably prepares/reuses the exact pending CSR,
+then posts only device ID, request ID and CSR to the verified HTTPS origin's
+`/device/certificates/renew` using the current operational bearer. The existing
+bounded, no-redirect transport preserves configured HTTPS CA trust; returned
+MQTT CA material is never added to HTTPS trust. The c3 installer validates and
+atomically installs the response and returns only its public installation receipt.
+If the current bundle already carries the pending rotation request ID, retry
+reconstructs the issued response from that bundle and reconciles installation
+without another HTTP request. All failures are sanitized; pending and backup
+state survive uncertain responses/installations.
+
+`rotation_pending` is an existing-only, no-follow, runtime-owned, ACL-free,
+locked read-only probe. Missing store/state/pending returns false; unsafe state,
+missing fixed lock, duplicate fields, non-object or oversized JSON fails closed.
+Actual CSR/context validation occurs during renewal preparation.
+
+After successful inform response handling, enrolled enabled handlers serialize
+maintenance with an async lock. A validated leaf expiring within 24 hours or
+existing pending state triggers reconciliation. Probe, transport, cryptography
+and post-install materialization run on a detached snapshot in a worker thread.
+A configuration/binding change while working invalidates the old publisher and
+cannot activate the stale snapshot. Otherwise existing fingerprint-aware reload
+and MQTT synchronization replace the client, retaining current-client callback
+checks and requiring a fresh successful connect callback for readiness.
+Maintenance failures emit a fixed warning without failing a successful inform;
+poll-loop runtime reload failures are contained and enrolled errors sanitized.
+
+Only one pending renewal cycle is supported until explicit future completed
+request/journal retirement. No expired-current recovery, legacy enrollment
+fallback, new command/capability, reports, exact acknowledgment, retirement or
+real broker/HTTPS proof is implemented here. Tests use real synthetic PKI and
+mocked HTTPS/Paho, not a live broker or HTTPS server.
