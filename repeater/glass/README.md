@@ -95,6 +95,42 @@ successful connect callback. Failed/stale callbacks cannot acknowledge a new
 certificate. CSR rotation, installation-report semantics and real-broker
 renewal/ACL proof are separate follow-up work, not implemented here.
 
+## Inactive durable pending CSR helper (Task5(c1) only)
+
+`rotation_state.prepare_rotation(credentials, *, store_dir)` accepts an already
+loaded enrollment bundle and revalidates its HTTPS origin, stable device ID,
+operational token and currently valid key/certificate/CA using the enrollment
+helpers **before touching state**. It performs no network requests and is not
+called by the handler. Expired-certificate recovery requires a future explicit
+loader; it is not silently enabled here.
+
+The administrator-provisioned store uses the same strict ancestry checks as
+MQTT materialization. Its runtime-owned, ACL-free `rotation-state` directory
+must be mode 0700; the fixed `.lock` and `pending.json` must be regular,
+runtime-owned, ACL-free mode-0600 files. Existing unsafe paths fail rather than
+being repaired. New private entries have inherited POSIX ACLs stripped.
+A no-follow directory-FD lock with exclusive `flock` serializes preparation
+across threads and processes.
+
+The bounded (32768-byte) version-1 pending JSON contains only `version`,
+`base_url`, `device_id`, `generation_sha256`, `request_id`, `private_key` and
+`csr_pem`. The enrollment generation is SHA256 of the ASCII operational token,
+**not the current certificate serial**. No token, current certificate or
+installation report is persisted here. A new RSA-2048 key and SHA256 CSR with
+CN `device:<UUID>` are generated once; subsequent calls/restarts reuse the
+exact persisted request UUID, key and CSR. Invalid state, different origin,
+identity or generation fails closed without overwriting; recovery is future
+work. The private key is canonical PKCS8 PEM and the CSR signature, identity
+and public-key match are checked on readback.
+
+Under the lock, preparation stages a private file, flushes/fsyncs it, atomically
+replaces `pending.json`, fsyncs the directory and reads back/validates before
+returning **only** `device_id`, `request_id` and `csr_pem`. Pre-replace failures
+remove staging; post-replace failures return no result and do not fake a
+rollback. A retry reuses the published state. Issuance, installation, MQTT
+activation, installation acknowledgements and real-broker authorization proof
+are **not** implemented by this helper or claimed as Task5 completion.
+
 ## Parity and provenance
 
 All 13 files in `tests/fixtures/glass` (12 JSON envelopes/producer examples plus
