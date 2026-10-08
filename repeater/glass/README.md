@@ -267,3 +267,59 @@ request/journal retirement. No expired-current recovery, legacy enrollment
 fallback, new command/capability, reports, exact acknowledgment, retirement or
 real broker/HTTPS proof is implemented here. Tests use real synthetic PKI and
 mocked HTTPS/Paho, not a live broker or HTTPS server.
+
+## Inactive public report outbox and exact acknowledgment (Task5(c5a))
+
+`rotation_reports.queue_report(credentials, *, store_dir, credential_file,
+boot_id, connected_serial, connected_fingerprint)` is an **internal offline**
+API. Connection metadata must eventually come from the actual successful
+**current-client** callback; this helper cannot prove that callback occurred.
+There is no handler wiring, HTTP/capability passthrough, network call or broker
+proof in this slice. Boot IDs are strict canonical UUID strings; serial and
+DER-SHA256 fingerprint must be strict strings matching the installed leaf.
+
+All three APIs use the existing private rotation directory and fixed exclusive
+flock; they never provision a lock or repair unsafe state. Under that same lock,
+the existing absolute lexical credential filename, full canonical loaded bundle,
+cryptographic pending request, c3 journal candidate digest and valid previous
+bundle are checked. The candidate is reconstructed using the installed public
+certificate response, previous context and pending key. Expired current or
+previous certificates remain unsupported pending an explicit recovery loader.
+
+The one `report-outbox.json` (at most 4096 bytes) contains exactly integer
+`version: 1`, `base_url`, token-derived `generation_sha256`, `credential_file`,
+canonical current-bundle `candidate_sha256` and `report`. The public report
+contains only `device_id`, `request_id`, `cert_serial`, `fingerprint_sha256`,
+`boot_id`, and literal `connected: true`. No key, token, PEM or timestamp is
+stored in either report file. Both records require runtime ownership, regular
+no-follow files, mode 0600, no POSIX ACLs and unique JSON keys. Malformed, unsafe
+or foreign records fail closed without repair, replacement or deletion.
+
+A queued historical boot assertion is returned unchanged even when a later boot
+connects; it must be exactly acknowledged before a new boot report can replace
+it. With no outbox, a valid accepted receipt for the same boot suppresses another
+outbox. A later boot creates a new outbox while retaining the last receipt.
+`load_report(credentials, *, store_dir, credential_file)` validates current
+state and both report files and returns the public outbox or `None`. It never
+removes a crash-recovery outbox alongside its accepted receipt.
+
+`acknowledge_report(credentials, report, response, *, store_dir, credential_file)`
+requires the **full exact saved in-flight report**, including boot and fingerprint,
+as well as exactly five response fields: matching strict-string `device_id`,
+`request_id`, `cert_serial`, literal `accepted: true` and `state: "node_reported"`.
+Wrong/stale/extra/type-invalid input makes no writes or deletions. The bounded
+8192-byte `report-accepted.json` copies the outbox record and adds only `ack`.
+Publication uses an exclusively created private owned stage, bounded checked
+write, flush/fsync, readback, atomic replacement, directory fsync and full
+readback before rereading the exact outbox bytes and unlinking it. The directory
+is fsynced and the receipt read back again before success. An identical receipt
+is reused without rewriting; absent-outbox retries succeed only with the exact
+receipt/report/response. Failures after publication or unlink raise without fake
+rollback, so a retry reconciles either crash window. Only this call's staging
+files are cleaned, and descriptors/the lock are released on errors.
+
+The latest accepted receipt is an acknowledged **boot assertion**, not evidence
+of real broker ownership or delivery. Pending CSR and installation journal are
+never retired here. Handler callback integration, report transport, explicit
+cycle retirement, reenrollment and real-broker renewal/revocation/ACL proof
+remain later gated work; this is not completion of the original Task5.
