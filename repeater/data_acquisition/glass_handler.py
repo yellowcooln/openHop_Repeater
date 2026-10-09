@@ -352,10 +352,106 @@ class GlassHandler:
             "uptime_seconds": count("uptime_seconds"),
             "mode": mode if mode in {"forward", "monitor", "no_tx"} else None,
             "status": "observed",
-            "counters": {key: count(key) for key in (
-                "rx_count", "forwarded_count", "dropped_count", "sent_flood_count", "sent_direct_count"
-            )},
+            "counters": {
+                key: count(key)
+                for key in (
+                    "rx_count",
+                    "forwarded_count",
+                    "dropped_count",
+                    "sent_flood_count",
+                    "sent_direct_count",
+                )
+            },
         }
+
+    def _job_capabilities(self):
+        from repeater.config_manager import ConfigManager
+
+        capabilities = {"diagnostic.read": 1}
+        manager = self.config_manager
+        if isinstance(manager, ConfigManager) and manager.config is self.config:
+            capabilities["config.read"] = 1
+            if (
+                manager.daemon is self.daemon_instance
+                and self.daemon_instance is not None
+                and getattr(self.daemon_instance, "repeater_handler", None) is not None
+            ):
+                capabilities["set_mode"] = 1
+        return capabilities
+
+    @staticmethod
+    def _mode_from_config(config):
+        section = config.get("repeater") if isinstance(config, dict) else None
+        mode = section.get("mode") if isinstance(section, dict) else None
+        return mode if mode in ("forward", "monitor", "no_tx") else None
+
+    def _effective_mode(self):
+        daemon = self.daemon_instance
+        engine = getattr(daemon, "repeater_handler", None)
+        mode = self._mode_from_config(getattr(engine, "config", None))
+        return mode if mode == self._mode_from_config(getattr(daemon, "config", None)) else None
+
+    def _configuration_view(self):
+        snapshot = self.config_manager.configuration_snapshot()
+        return {
+            "scope": "repeater.mode",
+            "revision_format": "yaml-sha256-v1",
+            "revision": snapshot["revision"],
+            "memory_revision": snapshot["memory_revision"],
+            "saved_mode": self._mode_from_config(snapshot["saved"]),
+            "configured_mode": self._mode_from_config(self.config),
+            "effective_mode": self._effective_mode(),
+        }
+
+    def _execute_v2_action(self, delivery):
+        if delivery.action == "diagnostic.read":
+            return {"status": "succeeded", "details": self._diagnostic_v2()}
+        if delivery.action == "config.read":
+            return {"status": "succeeded", "details": self._configuration_view()}
+        if delivery.action == "set_mode":
+            manager = self.config_manager
+            if delivery.expected_revision is None:
+                return {
+                    "status": "conflict",
+                    "persisted": False,
+                    "applied": False,
+                    "error_code": "revision_required",
+                }
+            result = manager.update_and_save(
+                {"repeater": {"mode": delivery.params["mode"]}},
+                expected_revision=delivery.expected_revision,
+            )
+            if not result["saved"]:
+                return {
+                    "status": "conflict"
+                    if result.get("error_code") == "revision_conflict"
+                    else "failed",
+                    "persisted": False,
+                    "applied": False,
+                    "error_code": result.get("error_code", "save_failed"),
+                }
+            try:
+                snapshot = manager.configuration_snapshot()
+            except ValueError:
+                return {
+                    "status": "unknown",
+                    "persisted": True,
+                    "applied": None,
+                    "error_code": "readback_unavailable",
+                }
+            effective = self._effective_mode()
+            applied = result["live_updated"] is True and effective == delivery.params["mode"]
+            saved_mode = self._mode_from_config(snapshot["saved"])
+            superseded = saved_mode != delivery.params["mode"]
+            return {
+                "status": "conflict" if superseded else ("succeeded" if applied else "failed"),
+                "persisted": True,
+                "applied": applied,
+                "restart_required": None if superseded else not applied,
+                "error_code": "superseded_after_save" if superseded else None,
+                "details": {"revision": snapshot["revision"], "saved_mode": saved_mode, "effective_mode": effective},
+            }
+        raise ValueError("Unsupported v2 executor")
 
     def _build_inform_v2(self, store, credentials):
         from repeater.glass.contracts import InformV2
@@ -372,7 +468,7 @@ class GlassHandler:
             "boot_id": self._boot_id, "sent_at": datetime.now(timezone.utc).isoformat(),
             "node_name": self.config.get("repeater", {}).get("node_name", "unknown-repeater"),
             "software_version": __version__, "pubkey": public_key,
-            "capabilities": {"diagnostic.read": 1},
+            "capabilities": self._job_capabilities(),
             "inventory": {"radios": [], "identities": [{"id": "local-repeater", "kind": "repeater"}], "sensors": [], "plugins": []},
             "telemetry": self._diagnostic_v2(), "results": [],
         }
@@ -482,12 +578,19 @@ class GlassHandler:
                         raise ValueError("Invalid Glass delivery lease")
                 guard()
                 store.acknowledge(response.accepted_results, inform.results, commit_guard=guard)
+                def execute(delivery):
+                    outcome = self._execute_v2_action(delivery)
+                    if delivery.action == "set_mode" and outcome.get("persisted") is True:
+                        # Permit exactly our admitted mode change, not unrelated
+                        # configuration changes racing the owned worker.
+                        snapshot.setdefault("repeater", {})["mode"] = delivery.params["mode"]
+                    return outcome
+
                 for delivery in (*response.queries, *response.jobs):
                     guard()
                     store.execute(
-                        delivery, self._boot_id,
-                        lambda _: {"status": "succeeded", "details": self._diagnostic_v2()},
-                        {"diagnostic.read": 1}, commit_guard=guard,
+                        delivery, self._boot_id, execute,
+                        self._job_capabilities(), commit_guard=guard,
                     )
                 guard()
                 return response.interval_seconds

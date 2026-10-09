@@ -1,5 +1,6 @@
 import copy
 import errno
+import hashlib
 import logging
 import os
 import stat
@@ -483,11 +484,34 @@ class ConfigManager:
             logger.error(f"Failed to live update daemon config: {e}", exc_info=True)
             return False
 
+    @staticmethod
+    def _configuration_revision(config: dict) -> str:
+        return hashlib.sha256(
+            yaml.safe_dump(config, sort_keys=True, allow_unicode=True).encode("utf-8")
+        ).hexdigest()
+
+    def configuration_snapshot(self) -> dict[str, Any]:
+        """Internal unredacted disk readback; callers must select public fields."""
+        with _CONFIG_WRITE_LOCK:
+            try:
+                with open(self.config_path, encoding="utf-8") as source:
+                    persisted = yaml.safe_load(source)
+                if not isinstance(persisted, dict):
+                    raise TypeError("Saved configuration must be an object")
+                return {
+                    "saved": persisted,
+                    "revision": self._configuration_revision(persisted),
+                    "memory_revision": self._configuration_revision(self.config),
+                }
+            except (OSError, ValueError, TypeError, yaml.YAMLError):
+                raise ValueError("Configuration readback unavailable") from None
+
     def update_and_save(
         self,
         updates: Dict[str, Any],
         live_update: bool = True,
         live_update_sections: Optional[List[str]] = None,
+        expected_revision: str | None = None,
     ) -> Dict[str, Any]:
         """
         Apply updates to config, save to file, and optionally live update daemon.
@@ -511,6 +535,23 @@ class ConfigManager:
 
         with _CONFIG_WRITE_LOCK:
             try:
+                if expected_revision is not None:
+                    try:
+                        snapshot = self.configuration_snapshot()
+                    except ValueError:
+                        result.update(
+                            error_code="configuration_unavailable",
+                            error="Configuration readback unavailable",
+                        )
+                        return result
+                    if (
+                        snapshot["memory_revision"] != expected_revision
+                        or snapshot["revision"] != expected_revision
+                    ):
+                        result.update(
+                            error_code="revision_conflict", error="Configuration revision changed"
+                        )
+                        return result
                 # Stage privately so a failed write cannot leak into running state.
                 updates = copy.deepcopy(updates)
                 candidate = copy.deepcopy(self.config)
