@@ -83,6 +83,7 @@ class GlassHandler:
         self._pending_command_results: List[Dict[str, Any]] = []
         self._pending_lock = asyncio.Lock()
         self._rotation_lock = asyncio.Lock()
+        self._job_lock = asyncio.Lock()
 
         self._runtime_settings_valid = False
         self._reload_runtime_settings()
@@ -324,45 +325,181 @@ class GlassHandler:
         if not self.enabled:
             return self.inform_interval_seconds
 
-        payload = await self._build_inform_payload()
-        authenticated = bool(self._operational_credentials)
-        response = await self._post_inform(payload)
-
-        if payload.get("command_results"):
-            async with self._pending_lock:
-                self._pending_command_results = []
-
-        response_type = str(response.get("type", "noop"))
-        response_interval = response.get("interval")
-
-        if response_type == "command":
-            await self._handle_command_response(response)
-        elif response_type == "config_update":
-            ok, message = self._apply_config_update(
-                response.get("config", {}),
-                str(response.get("merge_mode", "patch")),
-            )
-            if ok:
-                logger.info("Applied Glass config update")
-            else:
-                logger.warning("Failed to apply Glass config update: %s", message)
-        elif response_type == "cert_renewal":
-            ok, message = self._apply_cert_renewal(response)
-            if ok:
-                logger.info("Applied Glass certificate renewal")
-            else:
-                logger.warning("Failed to apply Glass certificate renewal: %s", message)
-        elif response_type == "upgrade":
-            logger.warning("Glass upgrade action received but not implemented on repeater")
-        elif response_type != "noop":
-            logger.warning("Unknown Glass response type: %s", response_type)
-
-        if isinstance(response_interval, int):
-            self.inform_interval_seconds = self._clamp_interval(response_interval)
-        if authenticated:
+        if self._operational_credentials:
+            interval = await self._inform_v2_once()
             await self._maintain_operational_certificate()
             await self._flush_operational_certificate_report()
+            return interval
+
+        # Unenrolled /inform is observation/discovery only. A legacy response
+        # cannot confer command, configuration, certificate or RF authority.
+        payload = await self._build_inform_payload()
+        response = await self._post_inform(payload)
+        response_interval = response.get("interval")
+        if type(response_interval) is int:
+            self.inform_interval_seconds = self._clamp_interval(response_interval)
         return self.inform_interval_seconds
+
+    def _diagnostic_v2(self):
+        """Explicit bounded nonsecret observations; no configuration export."""
+        stats = self.daemon_instance.get_stats() if self.daemon_instance else {}
+        def count(key):
+            value = stats.get(key)
+            return value if type(value) is int and 0 <= value <= 2**63 - 1 else None
+        mode = self.config.get("repeater", {}).get("mode")
+        return {
+            "software_version": str(__version__)[:64],
+            "uptime_seconds": count("uptime_seconds"),
+            "mode": mode if mode in {"forward", "monitor", "no_tx"} else None,
+            "status": "observed",
+            "counters": {key: count(key) for key in (
+                "rx_count", "forwarded_count", "dropped_count", "sent_flood_count", "sent_direct_count"
+            )},
+        }
+
+    def _build_inform_v2(self, store, credentials):
+        from repeater.glass.contracts import InformV2
+
+        if not self.daemon_instance or not getattr(self.daemon_instance, "local_identity", None):
+            raise ValueError("Local identity unavailable")
+        public_key = "0x" + bytes(self.daemon_instance.local_identity.get_public_key()).hex()
+        if public_key != credentials["pubkey"]:
+            raise ValueError("Operational identity mismatch")
+        # No guessed physical-radio IDs, plugin schemas, or verified domains.
+        # Only the existing single local repeater identity is actually observed.
+        payload = {
+            "type": "inform", "version": 2, "device_id": credentials["device_id"],
+            "boot_id": self._boot_id, "sent_at": datetime.now(timezone.utc).isoformat(),
+            "node_name": self.config.get("repeater", {}).get("node_name", "unknown-repeater"),
+            "software_version": __version__, "pubkey": public_key,
+            "capabilities": {"diagnostic.read": 1},
+            "inventory": {"radios": [], "identities": [{"id": "local-repeater", "kind": "repeater"}], "sensors": [], "plugins": []},
+            "telemetry": self._diagnostic_v2(), "results": [],
+        }
+        parsed = InformV2.model_validate(payload)
+        # Bound the WHOLE envelope, not just each saved outcome. Leave the
+        # remainder durable for subsequent polls; never clear an unsent body.
+        for outcome in store.pending_results():
+            candidate = dict(payload, results=[*payload["results"], outcome])
+            try:
+                next_inform = InformV2.model_validate(candidate)
+            except ValueError:
+                if not payload["results"]:
+                    raise
+                break
+            payload, parsed = candidate, next_inform
+        return parsed
+
+    @staticmethod
+    def _post_job_json(url, payload, credentials, ca_file, timeout):
+        """Strict bounded HTTPS; return 409 separately only for outbox reconciliation."""
+        from repeater.glass.contracts import MAX_ENVELOPE_BYTES, checked_json, decode_json
+        from repeater.glass.enrollment import EnrollmentError, _NoRedirect, validate_https_url
+
+        validate_https_url(url)
+        checked_json(payload, json_only=True)
+        body = json.dumps(payload, separators=(",", ":"), allow_nan=False).encode()
+        if len(body) > MAX_ENVELOPE_BYTES or not 0 < timeout <= 60:
+            raise EnrollmentError("Invalid Glass request bounds")
+        try:
+            context = ssl.create_default_context(cafile=ca_file)
+            req = request.Request(url, data=body, method="POST", headers={
+                "Content-Type": "application/json",
+                "Authorization": "Bearer " + credentials["operational_token"],
+            })
+            opener = request.build_opener(request.HTTPSHandler(context=context), _NoRedirect())
+            with opener.open(req, timeout=timeout) as response:
+                raw = response.read(MAX_ENVELOPE_BYTES + 1)
+            return decode_json(raw)
+        except error.HTTPError as exc:
+            status = exc.code
+            exc.close()
+            if status == 409:
+                return None
+            raise EnrollmentError("Verified Glass job request failed") from None
+        except Exception:  # noqa: BLE001 - credential-bearing library errors must be sanitized
+            raise EnrollmentError("Verified Glass job request failed") from None
+
+    async def _inform_v2_once(self):
+        from repeater.glass.contracts import ResponseV2, ResultAcceptanceV2
+        from repeater.glass.enrollment import load_credentials
+        from repeater.glass.job_store import JobStore, ledger_context
+
+        # Lock belongs to the actual owned worker, not a cancelled await wrapper.
+        async with self._job_lock:
+            with self._mqtt_lock:
+                snapshot = copy.deepcopy(self.config)
+                credentials = dict(self._operational_credentials)
+                context = ledger_context(credentials, self.operational_credential_file)
+                filename, directory = self.operational_credential_file, self.cert_store_dir
+                origin, ca, timeout = self.base_url, self.ca_cert_path, self.request_timeout_seconds
+            cancelled = threading.Event()
+
+            def guard():
+                with self._mqtt_lock:
+                    if (
+                        cancelled.is_set() or not self._runtime_settings_valid
+                        or not self.enabled or not self.verify_tls or self.config != snapshot
+                        or ledger_context(self._operational_credentials, self.operational_credential_file) != context
+                        or self.cert_store_dir != directory or self.base_url != origin
+                        or self.ca_cert_path != ca or self.request_timeout_seconds != timeout
+                    ):
+                        raise ValueError("Glass job context changed")
+
+            def current_credentials():
+                guard()
+                loaded = load_credentials(filename, base_url=origin, device_id=context["device_id"])
+                if ledger_context(loaded, filename) != context:
+                    raise ValueError("Glass job credential generation changed")
+                guard()
+                return loaded
+
+            def consume():
+                current = current_credentials()
+                store = JobStore(context, directory)
+                guard()
+                inform = self._build_inform_v2(store, current)
+                response = self._post_job_json(origin + "/inform/v2", inform.model_dump(mode="json"), current, ca, timeout)
+                current_credentials()
+                if response is None:
+                    # Ordinary inform still fails on stale lease. Archive only
+                    # real durable bodies the just-sent inform actually offered.
+                    for offered in inform.results:
+                        guard()
+                        ack = self._post_job_json(origin + "/device/commands/results/reconcile", offered.model_dump(mode="json"), current_credentials(), ca, timeout)
+                        if ack is None:
+                            raise ValueError("Glass rejected historical result")
+                        acceptance = ResultAcceptanceV2.model_validate(ack)
+                        current_credentials()
+                        guard()
+                        store.acknowledge([acceptance], [offered], commit_guard=guard)
+                    raise ValueError("Stale Glass inform reconciled; retry next poll")
+                response = ResponseV2.model_validate(response)
+                response.check_inform(inform)  # Entire response before ANY writes.
+                now = datetime.now(timezone.utc)
+                for delivery in (*response.queries, *response.jobs):
+                    if delivery.lease_id is None or not delivery.created_at <= now < min(delivery.expires_at, delivery.lease_expires_at):
+                        raise ValueError("Invalid Glass delivery lease")
+                guard()
+                store.acknowledge(response.accepted_results, inform.results, commit_guard=guard)
+                for delivery in (*response.queries, *response.jobs):
+                    guard()
+                    store.execute(
+                        delivery, self._boot_id,
+                        lambda _: {"status": "succeeded", "details": self._diagnostic_v2()},
+                        {"diagnostic.read": 1}, commit_guard=guard,
+                    )
+                guard()
+                return response.interval_seconds
+
+            # Existing owning loop drains through repeated cancellation and
+            # converts worker exceptions to safe data; no orphan executor effects.
+            interval = await self._owned_report_worker(consume, cancelled, failure_message="Glass authenticated v2 consumption failed")
+            if type(interval) is not int:
+                raise ValueError("Authenticated Glass v2 inform failed")
+            guard()
+            self.inform_interval_seconds = interval
+            return interval
 
     def _report_binding(self):
         """Public namespace/leaf binding; caller owns the MQTT mutex."""
@@ -401,7 +538,7 @@ class GlassHandler:
             and self.operational_credential_file
         )
 
-    async def _owned_report_worker(self, action, cancelled_event):
+    async def _owned_report_worker(self, action, cancelled_event, *, failure_message="Glass operational certificate report failed"):
         """Own the executor through repeated cancellation; failures are safe data."""
         def safe_action():
             try:
@@ -421,7 +558,7 @@ class GlassHandler:
                     self._invalidate_runtime_settings()
             result, failed = worker.result()
             if failed:
-                logger.warning("Glass operational certificate report failed")
+                logger.warning(failure_message)
             return result
         finally:
             if cancelled is not None:

@@ -26,13 +26,12 @@ missing sensor units without inventing identity/capabilities/control authority.
 Its `control_allowed:false` is an offline adapter property, **not a repair of
 existing v1 mutation routes**.
 
-`GlassHandler.protocol_eligibility(operational_credentials=bool)` is an unused
-future integration seam: configured `glass.device_id` plus explicit caller
-credential readiness may indicate v2 eligibility. It does not authenticate or
-switch HTTP transport. The live HTTP producer still emits v1 and `/inform` explicitly
-rejects non-v1 outbound payloads before any network operation. An authenticated
-v2 HTTP route/dispatcher belongs to later work; enrolled MQTT telemetry below
-uses its own v2 stable-identity envelope.
+`GlassHandler.protocol_eligibility(operational_credentials=bool)` remains an
+eligibility helper, not authentication. The owned enrolled/enabled poll path now
+emits strict `InformV2` to `/inform/v2`; credential loading and verified HTTPS are
+mandatory and there is no legacy fallback. Unenrolled discovery retains the
+existing v1 builder/transport. The Task7 section below specifies the new bounded
+ledger and consumption path; historical Task5 sections describe their own slices.
 
 ## Enrolled MQTT credentials and telemetry
 
@@ -559,3 +558,135 @@ expiry. Its Paho/HTTPS seams are mocks, NOT broker/proxy proof. Secure-ancestry
 focused execution, independent review, final parent suites and actual isolated
 HTTPS/Mosquitto proof remain required. This source candidate does not itself
 complete Task5 and authorizes no live deployment, command or RF changes.
+
+## Durable bounded node execution and owned v2 consumption (Task7 candidate)
+
+`job_store.py` uses stdlib SQLite schema 1 under the administrator-provisioned
+`cert_store_dir/execution-ledger`. Strict existing ancestry helpers reject symlinks,
+unsafe ownership/modes/ACLs and parent traversal without repairing them. The child
+is runtime-owned 0700; DB, fixed flock and rollback journal are runtime-owned,
+ACL-free regular 0600 files (hardlinks and unexpected side files are rejected).
+New entries strip inherited ACLs. SQLite DELETE journal/FULL synchronous and
+explicit file/directory fsync fence receipt, START, outcome and ACK. Every API
+opens the same fixed flock; `execute` holds it through the actual callback and
+outcome commit, including across processes. SQLite opens through the checked
+Linux directory-FD path, not an unchecked alternate filename.
+
+`ledger_context(loaded_credentials, absolute_canonical_credential_file)` stores
+only origin/device/path/token SHA256. It intentionally excludes leaf serial and
+fingerprint: certificate rotation at that path does not change generation.
+Foreign context fails closed; no automatic generation migration or old outbox
+execution is permitted. Secrets and certificate material are not stored.
+
+Public internal APIs:
+
+* `JobStore(context, store_dir)` checks schema/context and converts any surviving
+  START to stable `unknown`, preserving the original wire lease and boot. A
+  constructor cannot observe an in-flight cooperating executor because it waits
+  on the same flock. It never reexecutes a crashed callback.
+* `receive(request, boot_id, capabilities, now=None)` durably returns either a
+  detached `{"state": "received"}` or the exact existing result dictionary.
+  All deliveries require a valid leased RequestV2. Unsupported registered-model
+  requests get a valid leased `unsupported` outcome without calling an executor.
+* `execute(request, boot_id, executor, capabilities, now=None, commit_guard=None)`
+  returns a detached ResultV2 dictionary. The trusted callback accepts the checked
+  request and returns outcome kwargs (`status`, `details`, optional strict flags,
+  error/message). Receipt and START are durable **before** callback entry. The
+  optional guard is internal admission under flock, never response/config data.
+  Exceptions or invalid/oversized callback output after START mean `unknown`,
+  not fabricated failure or rollback. A receipt-only retry must still have a
+  valid request and lease; a previously started same execution never resumes.
+* `pending_results(limit=64)` returns exact saved wire dictionaries, oldest first,
+  at most one result per request/execution identity per poll. Safe query rereads
+  use a new server lease/attempt; a same-lease replay returns the prior outcome.
+  Job identity is execution ID plus canonical immutable request (lease fields
+  excluded), also checking request ID/idempotency key conflicts.
+* `acknowledge(acceptances, offered_results, *, commit_guard=None)` validates every
+  receipt before mutation. Explicit UUID plus SHA256 must match one exact offered
+  and saved body; missing, unoffered, changed or duplicate identities fail closed.
+  It returns newly acknowledged count. The optional internal ACK admission fence
+  runs under flock after validation and before commit. Once admitted, exact
+  historical ACK durability can finish after later cancellation without rollback.
+* `cancel(execution_id)` returns `cancelled` only for durably received/not-started
+  work, storing a failed/cancelled outcome with `applied:false`; otherwise it
+  returns `too_late` or `not_found`. It does not interrupt or pretend to roll back
+  an admitted callback.
+* `reconcile(boot_id, evidence, now=None)` consumes **trusted local** evidence,
+  keyed by execution ID. A private callback may return `awaiting_verification`
+  with `verification` containing exactly `expected_boot_id`, `expected_version`,
+  `expected_revision`, `ready_deadline`. Success requires actual matching boot,
+  measured nonnegative integer uptime, actual software version, canonical
+  effective revision (64 lowercase SHA256 hex characters) and explicit readiness
+  before deadline. A new boot alone or a desired-hash echo is not evidence.
+  Timeout yields `unknown` with no fake completion. A private durable verification
+  decision retains predeadline proof or timeout even during lost ACK/restart.
+  The previous wire phase must receive its exact ACK before the next phase is
+  published; it is never replaced while unacknowledged. Acknowledged prior wire
+  bodies/digests/receipts stay in bounded phase history; an old ACK retry cannot
+  clear a successor phase. No production disruptive callback is registered in Task7.
+
+Hard budgets are 256 records, 64 unacknowledged/reserved records, 8 phases per
+record, 32 MiB of 4096-byte database pages and 64 KiB of canonical result body.
+An unresolved `awaiting_verification` retains its slot after its interim ACK,
+including while waiting for proof/deadline or holding an unpublished decision.
+ACK-triggered publication and reconciliation consume that same reservation,
+never a 65th outbox slot. Acknowledged `unknown` has no future publication path
+in this ledger but remains a non-evictable execution tombstone.
+Phases preserve state/time/boot; request offer, immutable body and exact result
+SHA are retained privately. Capacity rejects admission before any new effect.
+Acknowledged job tombstones are retained for 7 days, covering Glass's 24-hour
+request TTL. Acknowledged terminal read-query history can be pruned after its
+request expires, so ordinary polling does not consume a week of ledger slots.
+Active, unknown and unacknowledged records are never
+evicted. An unknown ledger can therefore fill and require explicit future
+operator recovery rather than an unsafe implicit reset.
+
+Implicit mutation clocks are sampled under flock, including after a real lock
+wait in reconciliation. Explicit `now` remains the caller's supplied observation
+time for deadline/lease checks. New START/result phases are floored by durable
+receipt, START, prior phase and result sent/completed times, including after
+SIGKILL/reopen. Prior wire bodies, digests and exact ACKs are never retimestamped.
+A node clock ahead of server time can still be rejected by the server: its exact
+body stays pending, not silently rewritten or acknowledged.
+
+Enrolled enabled `_inform_once` owns one async job lock and a fully drained
+executor worker through repeated cancellation. It snapshots configuration and
+context, reloads actual credentials before HTTP and after response, uses the
+operational bearer plus configured HTTPS CA (not the returned MQTT CA), prohibits
+redirects and bounds/strictly decodes JSON including duplicate-key rejection.
+Whole ResponseV2/check_inform and all lease validity checks precede ACK/delivery
+mutations. START and ACK guards fence cancellation/runtime/config changes under
+the durable lock. Cancellation after START drains and persists the real callback
+outcome; it never fakes rollback. Rotation/MQTT maintenance remains sequential
+following successful v2 consumption and retains its existing leaf-aware security.
+
+Unenrolled `/inform` remains observation/discovery only. Responses may change
+only the bounded polling interval; command/config/certificate/upgrade payloads
+cannot authorize mutations, advertisements or restarts. Enrolled traffic uses
+only `/inform/v2`; v2 failure never falls back to legacy authentication/dispatch.
+
+Only `diagnostic.read:1` is advertised/executed: explicit version, bounded uptime,
+known mode, observed status and a fixed nonsecret counter whitelist. Configuration
+read/set_mode remain unadvertised until Task8; received set_mode gets unsupported
+without any legacy dispatcher, restart or RF effect. Inventory honestly reports
+only the existing local repeater identity, not guessed radio IDs/semantics,
+plugins, sensors or verified domains. Whole-envelope result batching leaves any
+unsent bodies durable for later polls; no blanket pending-result clear occurs.
+
+Normal `/inform/v2` stale lease 409 still fails. Only the exact durable bodies
+actually offered by that inform may be sent to the authenticated bounded
+`/device/commands/results/reconcile` route. Strict ResultAcceptanceV2 plus exact
+UUID/digest ACK clears that body, including backend archival disposition
+`superseded` when available; this is historical receipt, not authoritative effect
+verification. Unknown execution tombstones remain and never rerun. No arbitrary
+root response payload is silently discarded.
+
+`test_glass_job_store.py` performs actual subprocess SIGKILL at durable receipt,
+START, synthetic effect, result and ACK boundaries and reopens the SQLite store,
+checking exact outcome replay and effect counts. `test_glass_job_handler.py`
+exercises the actual owning handler against explicit credential/transport seams;
+those seams are **not actual TLS or issuer proof**. Tests use secure owned
+home-directory temporary stores, not an insecure ancestry bypass. Parent real
+HTTPS/secure PKI, backend lease-history, independent review and final integrated
+suite gates remain mandatory. This source candidate does not claim Task7 done
+and authorizes no deployment, live commands, restart, enrollment or RF change.

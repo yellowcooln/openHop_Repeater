@@ -205,6 +205,8 @@ class Contract:
                     f.name: dump(getattr(value, f.name))
                     for f in fields(value)
                     if not (f.metadata.get("omit_none") and getattr(value, f.name) is None)
+                    and not (isinstance(value, ResultAcceptanceV2) and f.name == "disposition"
+                             and value.acceptance_id is None and value.disposition == "accepted")
                 }
             if isinstance(value, Mapping):
                 return {k: dump(v) for k, v in value.items()}
@@ -494,6 +496,7 @@ class ResultAcceptanceV2(Contract):
     execution_id: UUID | None
     acceptance_id: UUID | None = field(default=None, metadata={"omit_none": True})
     result_sha256: str | None = field(default=None, metadata={"omit_none": True})
+    disposition: str = "accepted"
 
     def _validate(self, raw):
         result = _validate_fields(
@@ -503,10 +506,13 @@ class ResultAcceptanceV2(Contract):
                 "execution_id": nullable(uuid_value),
                 "acceptance_id": nullable(uuid_value),
                 "result_sha256": nullable(digest_value),
+                "disposition": literal("accepted", "superseded"),
             },
         )
         if (result["acceptance_id"] is None) != (result["result_sha256"] is None):
             raise ValueError("acceptance ID and digest must be present together")
+        if result["disposition"] == "superseded" and result["acceptance_id"] is None:
+            raise ValueError("superseded history requires an exact receipt")
         return result
 
 
